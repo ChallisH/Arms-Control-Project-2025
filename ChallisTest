@@ -578,37 +578,9 @@ def main(pcf_file: str , loud = 0):
                 
     return filteredChannels , filteredEnergy , filteredCPS , filteredCounts , uncert , ratio , mass , shield , distance , age , shThic
 
-
-file1 = "Box/2025 Sr Design - Info Barriers/Synthetic Spectra/Pu_Bare_Det60cm_HPGe_outps/Pu_Bare_Det60cm_HPGe_CPS_tally18.pcf"
-
-file2 = "Box/2025 Sr Design - Info Barriers/Synthetic Spectra/Pu_Steel7.5cm_Det60cm_HPGe_outps/Pu_Steel7.5cm_Det60cm_HPGe_CPS_tally18.pcf"
-
-file3 = "Box/2025 Sr Design - Info Barriers/Synthetic Spectra/Pu_Lead0.7cm_Det60cm_HPGe_outps/Pu_Lead0.7cm_Det60cm_HPGe_CPS_tally18.pcf"
-
-file4 = "Box/2025 Sr Design - Info Barriers/Synthetic Spectra/Pu_HDPE4.0cm_Det100cm_HPGe_outps/Pu_HDPE4.0cm_Det100cm_HPGe_CPS_tally18.pcf"
-
-file5 = "Box/2025 Sr Design - Info Barriers/Synthetic Spectra/Pu_Bare_Det60cm_HPGe_outps/Pu_Bare_Det60cm_HPGe_CPS_tally118.pcf"
-
-CZTFile = "Box/2025 Sr Design - Info Barriers/CZT Outputs/Test Source. Cs137 1cm.spe"
-
-
+file1 = "Box/2025 Sr Design - Info Barriers/Synthetic Spectra/ . . ."
 
 if __name__ == "__main__":
 
     main(file2, 1)
 
-'''
-
-    main(file1 , 1)
-    
-    main(file2, 1)
-
-    main(file3, 1)
-
-    main(file4, 1)
-
-    main(file5, 1)
-
-    main(CZTFile, 1)
-    
-'''
