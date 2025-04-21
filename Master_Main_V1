@@ -167,7 +167,7 @@ def spectra_data(pcf_file: str,
             for t in trough_data:
                 print(f"  {t['energy_keV']:.2f} keV : {int(t['counts'])} counts")
 
-            break #ONE SPECTRA TOGGLE
+            break
 
     return energy[mask], counts[mask], uncert[mask], peak_data, trough_data
 
@@ -419,11 +419,11 @@ def master_main(pcf_file: str, loud=0):
         # (assumes energies array is sorted and roughly linear scale)
         # We use a small window (±2 keV for isolated peak, smaller for close pair) to find local max
         if key == "Pu240":
-            window = 5.0  # keV range on each side for Pu-240 (642 keV)
+            window = 2.5  # keV range on each side for Pu-240 (642 keV)
         elif key == "Pu239_low":
-            window = 5.0  # keV range for 646 keV peak
+            window = 1.5  # keV range for 646 keV peak
         else:  # "Pu239_high"
-            window = 5.0  # keV range for 659 keV peak (more isolated)
+            window = 3.0  # keV range for 659 keV peak (more isolated)
         # Determine index range for the window
         # Find start index where energy >= E_ref - window
         start_idx = max(0, next(i for i,v in enumerate(energies) if v >= E_ref - window))
@@ -461,84 +461,88 @@ def master_main(pcf_file: str, loud=0):
     if pu239_low_idx is None or pu239_high_idx is None:
         print("Warning: One of the Pu-239 peaks was not found. Results may be inaccurate.")
     
-    # Function to find right trough index from a given peak index
-    def find_right_trough(peak_idx):
-        i = peak_idx
-        while i < len(counts)-1 and counts[i+1] <= counts[i]:
-            i += 1
-        return i
-    
-    # Function to find left trough index from a given peak index
-    def find_left_trough(peak_idx):
-        j = peak_idx
-        while j > 0 and counts[j-1] <= counts[j]:
-            j -= 1
-        return j
-    
-    # Find troughs for Pu-240 peak (between Pu-240 and Pu-239_low)
-    left_trough_240 = find_left_trough(pu240_idx)
-    right_trough_240 = find_right_trough(pu240_idx)
-    # If Pu-239_low exists, its left trough is the same as Pu-240's right trough
-    if pu239_low_idx is not None:
-        left_trough_239low = right_trough_240
-        right_trough_239low = find_right_trough(pu239_low_idx)
-    else:
-        left_trough_239low = None
-        right_trough_239low = None
-    # For Pu-239_high peak (658.9 keV), find its troughs (left trough might coincide with Pu-239_low right trough)
-    if pu239_high_idx is not None:
-        left_trough_239high = find_left_trough(pu239_high_idx)
-        right_trough_239high = find_right_trough(pu239_high_idx)
-    else:
-        left_trough_239high = None
-        right_trough_239high = None
-    
+    trough_idxs, _ = find_peaks(-counts)
+    def get_troughs(peak_idx: int) -> tuple[int,int]:
+        left_cand  = [t for t in trough_idxs if t < peak_idx]
+        right_cand = [t for t in trough_idxs if t > peak_idx]
+        if not left_cand or not right_cand:
+            raise RuntimeError(f"No trough on one side of peak {peak_idx}")
+        return max(left_cand), min(right_cand)
+
     # Now perform Gaussian fits on each peak using singleGauss
     areas = {}
-    # Fit Pu-240 peak:
-    roi_start = left_trough_240
-    roi_end = right_trough_240
-    x_roi = energies[roi_start: roi_end+1]
-    y_roi = counts[roi_start: roi_end+1]
-    u_roi = uncertainties[roi_start : roi_end + 1]   # <— use the same indices here!
+    def fallback_roi(peak_idx):
+        """±HALF_WINDOW_KEV around the peak index, in channel‐space."""
+        e0 = energies[peak_idx]
+        lo = np.searchsorted(energies, e0 - HALF_WINDOW_KEV)
+        hi = np.searchsorted(energies, e0 + HALF_WINDOW_KEV)
+        # clamp
+        lo = max(0, lo)
+        hi = min(len(energies) - 1, hi)
+        return lo, hi
+
+    # --- Fit Pu‑240 ---
+    try:
+        lo240, hi240 = get_troughs(pu240_idx)
+        # if trough‐based ROI is too narrow, fall back
+        if hi240 - lo240 < 2:
+            lo240, hi240 = fallback_roi(pu240_idx)
+    except RuntimeError:
+        lo240, hi240 = fallback_roi(pu240_idx)
+    
+    x_roi = energies[lo240 : hi240 + 1]
+    y_roi = counts[lo240   : hi240 + 1]
+    u_roi = uncertainties[lo240 : hi240 + 1]
     amp, mu, sigma = singleGauss(x_roi, y_roi, u_roi, loud=loud)
-    area_240 = amp * sigma * (2 * 3.14159)**0.5
-    areas["Pu240"] = area_240
+    areas["Pu240"] = amp * sigma * np.sqrt(2 * np.pi)
+    #Debugging Prints
+    print("Range gausian was fit over:", x_roi )
+    print("Gausian fit to Pu-240")
     
-    # Fit Pu-239 main peak (645.97 keV) if found
+    # --- Fit Pu‑239_low ---
     if pu239_low_idx is not None:
-        roi_start = left_trough_239low
-        roi_end = right_trough_239low
-        x_roi = energies[roi_start: roi_end+1]
-        y_roi = counts[roi_start: roi_end+1]
-        u_roi = uncertainties[roi_start : roi_end + 1]   # <— use the same indices here!
-        amp, mu, sigma = singleGauss(x_roi, y_roi, u_roi, loud=loud)
-        area_239_low = amp * sigma * (2 * 3.14159)**0.5
-    else:
-        area_239_low = 0.0
-    areas["Pu239_low"] = area_239_low
+        try:
+            lo239, hi239 = get_troughs(pu239_low_idx)
+            if hi239 - lo239 < 2:
+                lo239, hi239 = fallback_roi(pu239_low_idx)
+        except RuntimeError:
+            lo239, hi239 = fallback_roi(pu239_low_idx)
     
-    # Fit Pu-239 secondary peak (658.93 keV) if found
+        x_roi = energies[lo239 : hi239 + 1]
+        y_roi = counts[lo239   : hi239 + 1]
+        u_roi = uncertainties[lo239 : hi239 + 1]
+        amp, mu, sigma = singleGauss(x_roi, y_roi, u_roi, loud=loud)
+        areas["Pu239_low"] = amp * sigma * np.sqrt(2 * np.pi)
+        #Debugging Prints
+        print("Range gausian was fit over:", x_roi ) 
+        print("Gausian fit to Pu-239low")
+    else:
+        areas["Pu239_low"] = 0.0
+    
+    # --- Fit Pu‑239_high ---
     if pu239_high_idx is not None:
-        roi_start = left_trough_239high
-        roi_end = right_trough_239high
-        x_roi = energies[roi_start: roi_end+1]
-        y_roi = counts[roi_start: roi_end+1]
-        u_roi = uncertainties[roi_start : roi_end + 1]   # <— use the same indices here!
+        try:
+            lo2, hi2 = get_troughs(pu239_high_idx)
+            if hi2 - lo2 < 2:
+                lo2, hi2 = fallback_roi(pu239_high_idx)
+        except RuntimeError:
+            lo2, hi2 = fallback_roi(pu239_high_idx)
+    
+        x_roi = energies[lo2 : hi2 + 1]
+        y_roi = counts[lo2   : hi2 + 1]
+        u_roi = uncertainties[lo2 : hi2 + 1]
         amp, mu, sigma = singleGauss(x_roi, y_roi, u_roi, loud=loud)
-        area_239_high = amp * sigma * (2 * 3.14159)**0.5
+        areas["Pu239_high"] = amp * sigma * np.sqrt(2 * np.pi)
+
+        #Debugging Prints
+        print("Range gausian was fit over:", x_roi )
+        print("Gausian fit to Pu-239high")
     else:
-        area_239_high = 0.0
-    areas["Pu239_high"] = area_239_high
+        areas["Pu239_high"] = 0.0
     
-    # Compute the isotopic ratio: Area(Pu-240) / (Area(Pu-239_low) + Area(Pu-239_high))
-    if (area_239_low + area_239_high) > 0:
-        pu_ratio_calc = areas["Pu240"] / (areas["Pu239_low"] + areas["Pu239_high"])
-    else:
-        pu_ratio_calc = float('inf')  # avoid division by zero (this should not happen for real spectra)
-    
-    # Get the known ratio from title (parsed earlier)
-    pu_ratio_title = title_ratio  # assuming parse_title returns a numeric ratio
+    # --- Compute ratio ---
+    denom = areas["Pu239_low"] + areas["Pu239_high"]
+    pu_ratio_calc = areas["Pu240"] / denom if denom > 0 else float("inf")
     
     # Calculate percent error between calculated and title ratio
     percent_error = abs(pu_ratio_calc - pu_ratio_title) / pu_ratio_title * 100.0 if pu_ratio_title != 0 else None
