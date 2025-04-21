@@ -1,0 +1,567 @@
+import warnings
+import lmfit
+import becquerel as bq
+import SpecUtils
+import math
+import numpy as np
+import scipy
+import matplotlib.pyplot as plt
+from scipy.signal import find_peaks
+from scipy.stats import norm
+from typing import Any
+
+
+
+"""
+==============================================================================================
+Input Spectra and Extract Information
+==============================================================================================
+"""
+
+def load_spectra(path_to_spectra: str) -> SpecUtils.SpecFile():
+    """
+    Loads spectrum file automatically for a given file type.
+    SpecUtils.ParserType.Auto will try to automatically determine
+    the file extension, so verify you are loading a compatible file"""
+
+    spec_file = SpecUtils.SpecFile()
+    try:
+        spec_file.loadFile(path_to_spectra, SpecUtils.ParserType.Auto)
+        return spec_file
+
+    except RuntimeError as e:
+        raise Exception(f"Failed to decode file: {e}")
+
+    return
+
+
+#=======================================================================================
+
+def parse_title(spectrum_title: str) -> dict[str, Any] | None:
+    """
+    Parses all the information in my (Tanner's) .pcf file titles
+    and loads it into a dictionary.
+
+    A few notes:
+        1. There is a bit of information here not useful for the
+           arm control information barriers project but is here
+           because of another project. You will not need things like
+           nps, U235 content, etc.
+        2. Pu239, Pu240, and other isotopics are weight fractions
+           are represented as NEGATIVE NUMBERS and you might want to
+           switch them back to positive.
+        3. det_max_erg is in MeV, but its more common to use keV.
+        4. PuRatio is just the ratio of Pu240/Pu239 and is positive
+           already since, yknow, negative divided by a negative.
+        5. NPS is a relic. Ignore, as it makes no sense in this context.
+        6. Titles are unique to the person/software that generated the
+           spectrum. If/when you use another detector or input a spectrum
+           I did not provide, the title will be different and this function
+           will not work.
+
+    Args:
+        spectrum_title: spectrum title as string
+
+    Returns:
+        Dictionary containing what the spectrum represents
+    """
+    
+    parts = spectrum_title.split("_")
+    
+    #Allows for the parsing of Tanners metadata in the titles of the files
+    
+    if len(parts) != 20:
+        print(f"Note: Unexpected title format, skipping metadata parsing. Title: '{spectrum_title}'")
+        return {
+        "snm":	'none found', "U232": 'none found', "U235": 'none found', "U238": 'none found', "Pu239": 'none found',
+        "Pu240":'none found', "Pu241": 'none found', "PuRatio": 'none found', "age": 'none found',
+        "snmir": 'none found', "snmor": 'none found', "U_mass":'none found', "Pu_mass": 'none found',
+        "shd_mat": 'none found', "shdor": 'none found', "det_type": 'none found', "det_dist": 'none found',
+        "det_bins":'none found', "det_max_erg": 'none found', "nps": 'none found'
+        }
+
+    snm, U232, U235, U238, Pu239, Pu240, Pu241, PuRatio, age, snmir, snmor, \
+    U_mass, Pu_mass, shd_mat, shdor, det_type, det_dist, det_bins, det_max_erg, \
+    nps = parts
+
+    return {
+        "snm":	snm, "U232": float(U232), "U235": float(U235), "U238": float(U238), "Pu239": float(Pu239),
+        "Pu240": float(Pu240), "Pu241": float(Pu241), "PuRatio": float(PuRatio), "age": int(age),
+        "snmir": float(snmir), "snmor": float(snmor), "U_mass": float(U_mass), "Pu_mass": float(Pu_mass),
+        "shd_mat": shd_mat, "shdor": float(shdor), "det_type": det_type, "det_dist": float(det_dist),
+        "det_bins": int(det_bins), "det_max_erg": float(det_max_erg), "nps": nps }
+
+
+#=======================================================================================================
+        
+def spectra_data(pcf_file: str,
+                 energy_min=600,
+                 energy_max=700,
+                 loud=0):
+    """
+    Extracts energy bin centers, counts, uncertainties, troughs, and peaks for a selected spectrum
+    within a specified energy range (default: 600–700 keV).
+    
+    Selection Criteria for edge case test sorting (small Pu240 peak):
+        - Pu_mass must equal 6000
+        - PuRatio must be less than 0.04
+
+    Returns:
+        energy (np.ndarray): Energy bin centers within the range
+        counts (np.ndarray): Gamma counts in each bin
+        uncert (np.ndarray): sqrt(counts) uncertainty in each bin
+    """
+    spectra = load_spectra(pcf_file)
+
+    for i in range(spectra.numMeasurements()):
+        spectrum = spectra.measurement(i)
+        info = parse_title(spectrum.title())
+        livetime = spectrum.liveTime()
+        realtime = spectrum.realTime()
+        deadtime_frac = 1 - livetime / realtime
+
+        # Apply filtering criteria
+        if float(info["Pu_mass"]) != 6000 or float(info["PuRatio"]) >= 0.04:
+            continue
+
+        # Extract energy, counts, and uncertainties
+        energy = np.array(spectrum.channelEnergies())[:-1]
+        counts = np.array(spectrum.gammaCounts())
+        uncert = np.sqrt(counts)
+        uncert[counts == 0] = 1.0  # Replace zero uncertainties
+
+        # Energy window mask
+        mask = (energy >= energy_min) & (energy <= energy_max)
+        
+        x_min, x_max = min(energy[mask]), max(energy[mask])
+        num_ticks = 10
+        xticks = np.linspace(x_min, x_max, num_ticks)
+
+        # --- Peak Finding ---
+        peaks, properties = find_peaks(counts[mask], height=1)  # Adjust height as needed
+
+        # --- Trough Finding (by inverting the signal) ---
+        troughs, trough_props = find_peaks(-counts[mask])
+
+        filteredEnergy = energy[mask]
+        filteredCounts = counts[mask]
+
+        peak_data = []
+        for idx in peaks:
+            peak_energy = filteredEnergy[idx]
+            peak_count = filteredCounts[idx]
+            peak_data.append({'energy_keV': peak_energy, 'counts': peak_count})
+
+        trough_data = []
+        for idx in troughs:
+            trough_energy = filteredEnergy[idx]
+            trough_count = filteredCounts[idx]
+            trough_data.append({'energy_keV': trough_energy, 'counts': trough_count})
+
+        if loud:
+            print("Detected Peaks (Energy [keV], Counts):")
+            for p in peak_data:
+                print(f"  {p['energy_keV']:.2f} keV : {int(p['counts'])} counts")
+                
+            print("Detected Troughs (Energy [keV], Counts):")
+            for t in trough_data:
+                print(f"  {t['energy_keV']:.2f} keV : {int(t['counts'])} counts")
+
+            break #ONE SPECTRA TOGGLE
+
+    return energy[mask], counts[mask], uncert[mask], peak_data, trough_data
+
+
+    raise ValueError("No matching WGPu spectrum found with Pu_mass=6000 and PuRatio<0.04.")
+
+
+"""
+==============================================================================================
+Bequerel Gausian Fit to RoI (most accurate?)
+==============================================================================================
+"""
+
+#=================================================================================================================
+def singleGauss(x, y, y_unc, loud=0):
+    """
+    Fit one Gaussian+linear background to the data in x/y with uncertainties y_unc.
+    Returns (amplitude, mu, sigma).
+    """
+    g   = bq.fitting.GaussModel(prefix="g_")
+    lin = bq.fitting.LineModel(prefix="bkg_")
+    model = g + lin
+
+    fitter = bq.Fitter(model, x=x, y=y, y_unc=y_unc, roi=(x.min(), x.max()))
+
+    # initial guesses from the tallest bin
+    peak_idx = np.argmax(y)
+    fitter.params["g_mu"].set(value=x[peak_idx])
+    fitter.params["g_sigma"].set(value=(x.max() - x.min()) / 6, min=0)
+    fitter.params["g_amp"].set(value=y[peak_idx], min=0)
+
+    fitter.fit()
+    if loud:
+        fitter.custom_plot()
+        plt.tight_layout()
+        plt.show()
+
+    amp   = fitter.result.params["g_amp"].value
+    mu    = fitter.result.params["g_mu"].value
+    sigma = fitter.result.params["g_sigma"].value
+    return amp, mu, sigma
+
+
+#===================================================================================================================================
+def multGauss(xEnergy , yCounts , yUnc , peakTargets , troughTargets, loud = 0):
+
+    '''
+    Inputs: xEnergy - energy bins of interest
+            yCounts - Counts for energy bins of interest
+            yUnc - sqrt of yCounts (uncertainty in counts)
+            peakTargets - known values of isotopes to be analyzed
+            troughTargets - border values around the peak cluster of interest
+            
+    Returns: gaussPeakEnergy - energies of the peaks of interest
+            gaussPeakCounts - Counts for the peaks of interest
+            tXVals - energies of the border values
+            tYVals - counts of the border values
+
+    NOTE: For use in the  ~635.07-643kev region when the Pu-240 peak is not well defined.
+    '''
+
+    peakVars , troughVars = peakVals(xEnergy , yCounts) , peakVals(xEnergy , yCounts)
+
+    peakEnergy , peakCounts = peakVars[0] , peakVars[1]
+
+    PP = nearestPeak(peakTargets , peakVars[0] , peakVars[1])
+
+    TP = nearestPeak(troughTargets , troughVars[0] , troughVars[1])
+
+    xVals , yVals = PP[0] , PP[1]
+
+    tXVals , tYVals = TP[0] , TP[1]
+
+    gaussPeakEnergy = []
+
+    gaussPeakCounts = []
+
+    for i in range(len(peakEnergy)):
+
+        if tXVals[0] <= peakEnergy[i] <= tXVals[1]:
+
+            gaussPeakEnergy.append(peakEnergy[i])
+
+            gaussPeakCounts.append(peakCounts[i])
+
+    gaussPeakEnergy = np.array(gaussPeakEnergy)
+
+    gaussPeakCounts = np.array(gaussPeakCounts)
+
+    width = (tXVals[1] - tXVals[0])/4
+
+    model = (
+        bq.fitting.GaussModel(prefix="gauss0_")
+        + bq.fitting.GaussModel(prefix="gauss1_")
+        + bq.fitting.GaussModel(prefix="gauss2_")
+        + bq.fitting.GaussModel(prefix="gauss3_")
+        + lmfit.models.LinearModel(prefix="line_")
+    )
+            
+    params = {
+        "gauss0_amp": gaussPeakCounts[0],
+        "gauss0_mu": gaussPeakEnergy[0],
+        "gauss0_sigma": width,
+        "gauss1_amp": gaussPeakCounts[1],
+        "gauss1_mu": gaussPeakEnergy[1],
+        "gauss1_sigma": width,
+        "gauss2_amp": gaussPeakCounts[2],
+        "gauss2_mu": gaussPeakEnergy[2],
+        "gauss2_sigma": width,
+        "gauss3_amp": gaussPeakCounts[3],
+        "gauss3_mu": gaussPeakEnergy[3],
+        "gauss3_sigma": width,
+        "line_slope": (tYVals[1]-tYVals[0])/(tXVals[1]-tXVals[0]),
+        "line_intercept": tYVals[0] - ((tYVals[1]-tYVals[0])/(tXVals[1]-tXVals[0])) * tXVals[0],
+    }
+            
+    fitter = bq.Fitter(
+        model,
+        x = xEnergy ,
+        y = yCounts,
+        y_unc = yUnc,
+        roi=(tXVals[0] , tXVals[1]),
+    )
+   
+        
+    fitter.params["gauss0_mu"].set(value=gaussPeakEnergy[0])
+    fitter.params["gauss1_mu"].set(value=gaussPeakEnergy[1])
+    fitter.params["gauss2_mu"].set(value=gaussPeakEnergy[2])
+    fitter.params["gauss3_mu"].set(value=gaussPeakEnergy[3])
+    fitter.fit()
+    if loud:
+        fitter.custom_plot()
+        plt.tight_layout()
+        plt.show()
+
+    return gaussPeakEnergy , gaussPeakCounts , tXVals , tYVals
+
+
+"""
+==============================================================================================
+MGA 
+==============================================================================================
+"""
+
+
+"""
+==============================================================================================
+Plotting 
+==============================================================================================
+"""
+import numpy as np
+import matplotlib.pyplot as plt
+
+def plot_specutils_spectrum(
+    spec,
+    energy_range=None,
+    peaks=None,
+    troughs=None,
+    ref_lines=None,
+    title=None
+):
+    """
+    Plot a SpecUtils spectrum with optional annotations.
+
+    Args:
+        spec:         A SpecUtils measurement (e.g. spec = spectra.measurement(0))
+        energy_range: (emin, emax) to zoom in on a subsection
+        peaks:        list of (energy, label) tuples to mark with 'x'
+        troughs:      list of (energy, label) tuples to mark with 'o'
+        ref_lines:    dict of label→energy to draw vertical dashed lines
+        title:        Optional plot title
+    """
+    # Build bin centers & counts
+    edges   = np.array(spec.channelEnergies())
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    counts  = np.array(spec.gammaCounts())[:-1]
+
+    fig, ax = plt.subplots(figsize=(10, 4), constrained_layout=True)
+
+    # 1) Plot the spectrum
+    ax.step(centers, counts, where="mid", color="navy", label="Counts")
+
+    # 2) Zoom if requested
+    if energy_range:
+        ax.set_xlim(*energy_range)
+
+    # 3) Mark detected peaks
+    if peaks:
+        pe = np.array([e for e, _ in peaks])
+        pc = np.interp(pe, centers, counts)
+        ax.scatter(pe, pc, marker="x", s=80, color="red", label="Detected peaks")
+        for e, lbl in peaks:
+            ax.text(e, np.interp(e, centers, counts) * 1.05,
+                    lbl, ha="center", color="red", fontsize="small")
+
+    # 4) Mark detected troughs
+    if troughs:
+        te = np.array([e for e, _ in troughs])
+        tc = np.interp(te, centers, counts)
+        ax.scatter(te, tc, marker="o", s=60, color="green", label="Detected troughs")
+        for e, lbl in troughs:
+            ax.text(e, np.interp(e, centers, counts) * 0.90,
+                    lbl, ha="center", color="green", fontsize="small")
+
+    # 5) Draw reference lines
+    if ref_lines:
+        for lbl, e in ref_lines.items():
+            ax.axvline(e, color="orange", linestyle="--", label=lbl)
+
+    # 6) Labels, grid, legend
+    ax.set_xlabel("Energy (keV)", fontsize="medium")
+    ax.set_ylabel("Counts", fontsize="medium")
+    if title:
+        ax.set_title(title, fontsize="large")
+    ax.grid(True, ls=":")
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), fontsize="small")
+
+    plt.show()
+
+
+"""
+==============================================================================================
+Master Main
+==============================================================================================
+"""
+
+def master_main(pcf_file: str, loud=0):
+    energies, counts, uncertainties, peak_data, trough_data = \
+        spectra_data(pcf_file, loud=loud)
+    # parse_title expects a string title, not the filename
+    # so first load the SpecUtils file and grab its title:
+    spec_file = load_spectra(pcf_file)
+    spec0     = spec_file.measurement(0)
+    info      = parse_title(spec0.title())
+    title_ratio = info["PuRatio"]
+    
+    # Identify peaks near the reference energies for Pu-240 and Pu-239
+    # Define reference energies (in keV) for the three peaks of interest
+    ref_peaks = {
+        "Pu240": 642.48,
+        "Pu239_low": 645.97,
+        "Pu239_high": 658.929
+    }
+    found_peaks = {}  # to store the indices of found peaks
+    
+    # Simple peak search around each reference energy
+    for key, E_ref in ref_peaks.items():
+        # Find index closest to the reference energy
+        # (assumes energies array is sorted and roughly linear scale)
+        # We use a small window (±2 keV for isolated peak, smaller for close pair) to find local max
+        if key == "Pu240":
+            window = 5.0  # keV range on each side for Pu-240 (642 keV)
+        elif key == "Pu239_low":
+            window = 5.0  # keV range for 646 keV peak
+        else:  # "Pu239_high"
+            window = 5.0  # keV range for 659 keV peak (more isolated)
+        # Determine index range for the window
+        # Find start index where energy >= E_ref - window
+        start_idx = max(0, next(i for i,v in enumerate(energies) if v >= E_ref - window))
+        # Find end index where energy >= E_ref + window
+        end_idx = min(len(energies)-1, next(i for i,v in enumerate(energies) if v >= E_ref + window))
+        # Find index of maximum count in this energy window
+        local_max_idx = start_idx + max(range(0, end_idx - start_idx + 1), key=lambda j: counts[start_idx + j])
+        # Check that this local max is indeed a peak (higher than its immediate neighbors)
+        if (local_max_idx > 0 and local_max_idx < len(counts)-1 
+                and counts[local_max_idx] > counts[local_max_idx-1] 
+                and counts[local_max_idx] > counts[local_max_idx+1]):
+            found_peaks[key] = local_max_idx
+        else:
+            found_peaks[key] = None
+    
+    # Determine if the Pu-240 peak was found
+    pu240_idx = found_peaks.get("Pu240")
+    if pu240_idx is None:
+        # No distinct Pu-240 peak detected near 642.48 keV
+        print("No Pu-240 peak found near 642.48 keV. Initiating MGA analysis (placeholder).")
+        """
+        #Placeholder for triple gause function (not implemented yet)
+        # Placeholder for MGA function call (not implemented)
+        # MGA(pcf_file)  # if MGA were implemented
+        """
+        return None  # Cannot compute ratio by this method
+    
+    # If Pu-240 peak is found, proceed to fit Gaussians on each peak
+    # We will find troughs around each peak to define the ROI for fitting
+    # First, get indices for the other peaks as well (they should exist if Pu-240 does)
+    pu239_low_idx = found_peaks.get("Pu239_low")
+    pu239_high_idx = found_peaks.get("Pu239_high")
+    
+    # Ensure the other peaks were found; if not, print a warning but attempt to proceed if possible
+    if pu239_low_idx is None or pu239_high_idx is None:
+        print("Warning: One of the Pu-239 peaks was not found. Results may be inaccurate.")
+    
+    # Function to find right trough index from a given peak index
+    def find_right_trough(peak_idx):
+        i = peak_idx
+        while i < len(counts)-1 and counts[i+1] <= counts[i]:
+            i += 1
+        return i
+    
+    # Function to find left trough index from a given peak index
+    def find_left_trough(peak_idx):
+        j = peak_idx
+        while j > 0 and counts[j-1] <= counts[j]:
+            j -= 1
+        return j
+    
+    # Find troughs for Pu-240 peak (between Pu-240 and Pu-239_low)
+    left_trough_240 = find_left_trough(pu240_idx)
+    right_trough_240 = find_right_trough(pu240_idx)
+    # If Pu-239_low exists, its left trough is the same as Pu-240's right trough
+    if pu239_low_idx is not None:
+        left_trough_239low = right_trough_240
+        right_trough_239low = find_right_trough(pu239_low_idx)
+    else:
+        left_trough_239low = None
+        right_trough_239low = None
+    # For Pu-239_high peak (658.9 keV), find its troughs (left trough might coincide with Pu-239_low right trough)
+    if pu239_high_idx is not None:
+        left_trough_239high = find_left_trough(pu239_high_idx)
+        right_trough_239high = find_right_trough(pu239_high_idx)
+    else:
+        left_trough_239high = None
+        right_trough_239high = None
+    
+    # Now perform Gaussian fits on each peak using singleGauss
+    areas = {}
+    # Fit Pu-240 peak:
+    roi_start = left_trough_240
+    roi_end = right_trough_240
+    x_roi = energies[roi_start: roi_end+1]
+    y_roi = counts[roi_start: roi_end+1]
+    u_roi = uncertainties[roi_start : roi_end + 1]   # <— use the same indices here!
+    amp, mu, sigma = singleGauss(x_roi, y_roi, u_roi, loud=loud)
+    area_240 = amp * sigma * (2 * 3.14159)**0.5
+    areas["Pu240"] = area_240
+    
+    # Fit Pu-239 main peak (645.97 keV) if found
+    if pu239_low_idx is not None:
+        roi_start = left_trough_239low
+        roi_end = right_trough_239low
+        x_roi = energies[roi_start: roi_end+1]
+        y_roi = counts[roi_start: roi_end+1]
+        u_roi = uncertainties[roi_start : roi_end + 1]   # <— use the same indices here!
+        amp, mu, sigma = singleGauss(x_roi, y_roi, u_roi, loud=loud)
+        area_239_low = amp * sigma * (2 * 3.14159)**0.5
+    else:
+        area_239_low = 0.0
+    areas["Pu239_low"] = area_239_low
+    
+    # Fit Pu-239 secondary peak (658.93 keV) if found
+    if pu239_high_idx is not None:
+        roi_start = left_trough_239high
+        roi_end = right_trough_239high
+        x_roi = energies[roi_start: roi_end+1]
+        y_roi = counts[roi_start: roi_end+1]
+        u_roi = uncertainties[roi_start : roi_end + 1]   # <— use the same indices here!
+        amp, mu, sigma = singleGauss(x_roi, y_roi, u_roi, loud=loud)
+        area_239_high = amp * sigma * (2 * 3.14159)**0.5
+    else:
+        area_239_high = 0.0
+    areas["Pu239_high"] = area_239_high
+    
+    # Compute the isotopic ratio: Area(Pu-240) / (Area(Pu-239_low) + Area(Pu-239_high))
+    if (area_239_low + area_239_high) > 0:
+        pu_ratio_calc = areas["Pu240"] / (areas["Pu239_low"] + areas["Pu239_high"])
+    else:
+        pu_ratio_calc = float('inf')  # avoid division by zero (this should not happen for real spectra)
+    
+    # Get the known ratio from title (parsed earlier)
+    pu_ratio_title = title_ratio  # assuming parse_title returns a numeric ratio
+    
+    # Calculate percent error between calculated and title ratio
+    percent_error = abs(pu_ratio_calc - pu_ratio_title) / pu_ratio_title * 100.0 if pu_ratio_title != 0 else None
+    
+    # Print the results
+    print(f"Computed Pu-240/239 ratio: {pu_ratio_calc:.4f}")
+    print(f"Pu-240/239 ratio from title: {pu_ratio_title:.4f}")
+    if percent_error is not None:
+        print(f"Percent error: {percent_error:.2f}%")
+    else:
+        print("Percent error: N/A (title ratio is zero)")
+    
+    # Return the key results
+    return pu_ratio_calc, pu_ratio_title, percent_error
+
+
+
+
+
+    
+#Test
+
+file1 = r"C:\Users\jrtes\Downloads\Pu_Bare_Det60cm_HPGe_CPS_tally98.pcf"
+master_main(file1, 1)
+
+
