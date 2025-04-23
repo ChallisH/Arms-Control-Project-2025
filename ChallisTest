@@ -116,7 +116,7 @@ def ratioCalc(IPu239 , IPu240):
 
     Bi_Pu239_645keV = 1.489 * 10 ** -7 #Branching Intensity for Pu239 emission of 645.97 keV
 
-    return IPu239 * lambda240 * Bi_Pu240_642keV / (IPu240 * lambda239 * Bi_Pu239_645keV)
+    return IPu239 * (Bi_Pu239_645keV + Bi_Pu240_642keV) * 24119 / ((IPu239 + IPu240) * Bi_Pu239_645keV * (24119 + 6564))
 
 ### \/\/\/ LEO'S STUFF \/\/\/ #######################################
 
@@ -219,11 +219,9 @@ def nearestPeak(targets , xEnergy , yCounts , spread = 1):
     return xVals , yVals
     
 
-def peakVals(xEnergy , yCounts , focus=100):
+def peakVals(xEnergy , yCounts , focus=10):
     
     peakIdx = scipy.signal.find_peaks(yCounts , height = focus)[0]
-
-    print(yCounts)
 
     allPeakE = xEnergy[peakIdx]
 
@@ -231,7 +229,31 @@ def peakVals(xEnergy , yCounts , focus=100):
 
     return allPeakE , allPeakC
 
+def oneGauss(xEnergy , yCounts , yUnc , troughTargets = [643.8515625 , 647.51245117]):
 
+    model = bq.fitting.GaussModel(prefix="gauss0_") + bq.fitting.LineModel(prefix="linear_")
+
+
+
+    # bin_indices = channels
+    # counts_vals = counts
+    # counts_uncs = square root of counts
+    
+    fitter = bq.Fitter(
+        model,
+        x = xEnergy,
+        y = yCounts,
+        y_unc = yUnc,
+        roi=(troughTargets[0], troughTargets[1]),
+    )
+
+    fitter.fit()
+
+    fitter.custom_plot()
+    plt.tight_layout()
+    plt.show()
+
+    return
 ################## Bq TIME #########################
             
 def multGauss(xEnergy , yCounts , yUnc , peakTargets , troughTargets):
@@ -253,7 +275,7 @@ def multGauss(xEnergy , yCounts , yUnc , peakTargets , troughTargets):
             a similar gaussian cluster
     '''
 
-    peakVars , troughVars = peakVals(xEnergy , yCounts) , peakVals(xEnergy , -yCounts + max(yCounts))
+    peakVars , troughVars = peakVals(xEnergy , yCounts) , peakVals(xEnergy , -yCounts + max(yCounts) , focus = 50)
 
     peakEnergy , peakCounts = peakVars[0] , peakVars[1]
 
@@ -283,87 +305,7 @@ def multGauss(xEnergy , yCounts , yUnc , peakTargets , troughTargets):
 
     width = (tXVals[1] - tXVals[0])/4
 
-    model = (
-        bq.fitting.GaussModel(prefix="gauss0_")
-        + bq.fitting.GaussModel(prefix="gauss1_")
-        + bq.fitting.GaussModel(prefix="gauss2_")
-        + bq.fitting.GaussModel(prefix="gauss3_")
-        + lmfit.models.LinearModel(prefix="line_")
-    )
-            
-    params = {
-        "gauss0_amp": gaussPeakCounts[0],
-        "gauss0_mu": gaussPeakEnergy[0],
-        "gauss0_sigma": width,
-        "gauss1_amp": gaussPeakCounts[1],
-        "gauss1_mu": gaussPeakEnergy[1],
-        "gauss1_sigma": width,
-        "gauss2_amp": gaussPeakCounts[2],
-        "gauss2_mu": gaussPeakEnergy[2],
-        "gauss2_sigma": width,
-        "gauss3_amp": gaussPeakCounts[3],
-        "gauss3_mu": gaussPeakEnergy[3]+0.73,
-        "gauss3_sigma": width,
-        "line_slope": (tYVals[1]-tYVals[0])/(tXVals[1]-tXVals[0]),
-        "line_intercept": tYVals[0] - ((tYVals[1]-tYVals[0])/(tXVals[1]-tXVals[0])) * tXVals[0],
-    }
-            
-    fitter = bq.Fitter(
-        model,
-        x = xEnergy ,
-        y = yCounts,
-        y_unc = yUnc,
-        roi=(tXVals[0] , tXVals[1]),
-    )
-            
-    fitter.params["gauss0_mu"].set(value=gaussPeakEnergy[0])
-    fitter.params["gauss1_mu"].set(value=gaussPeakEnergy[1])
-    fitter.params["gauss2_mu"].set(value=gaussPeakEnergy[2])
-    fitter.params["gauss3_mu"].set(value=gaussPeakEnergy[3])
-    fitter.fit()
-    fitter.custom_plot()
-    plt.tight_layout()
-    plt.show()
-
-    return gaussPeakEnergy , gaussPeakCounts , tXVals , tYVals
-
-################## Bq TIME #########################
-            
-def multGaussSet(xEnergy , yCounts , yUnc , gaussPeakEnergy = [632.86889648 , 637.26196289 , 639.45849609 , 641.6550293 , 645.31591797] ,
-                 tXVals = [632.86889648 , 645.31591797]):
-
-    '''
-    Inputs: xEnergy - energy bins of interest
-            yCounts - Counts for energy bins of interest
-            yUnc - sqrt of yCounts (uncertainty in counts)
-            peakTargets - known values of isotopes to be analyzed
-            troughTargets - border values around the peak cluster of interest
-            
-    Returns: gaussPeakEnergy - energies of the peaks of interest
-            gaussPeakCounts - Counts for the peaks of interest
-            tXVals - energies of the border values
-            tYVals - counts of the border values
-
-    NOTE: After using this function on some well defined spectra and fitting gaussians as intended,
-            I am using the values of energy for those peaks on the other spectra to see if it will fit
-            a similar gaussian cluster
-    '''
-
-    gaussPeakCounts = []
-
-    for i in range(len(yCounts)):
-
-        if tXVals[0] <= xEnergy[i] <= tXVals[1]:
-
-            gaussPeakCounts.append(yCounts[i])
-
-    gaussPeakEnergy = np.array(gaussPeakEnergy)
-
-    gaussPeakCounts = np.array(gaussPeakCounts)
-
-    tYVals = [gaussPeakCounts[0] , gaussPeakCounts[len(gaussPeakCounts)-1]]
-
-    width = (tXVals[1] - tXVals[0])/4
+    
 
     model = (
         bq.fitting.GaussModel(prefix="gauss0_")
@@ -407,8 +349,89 @@ def multGaussSet(xEnergy , yCounts , yUnc , gaussPeakEnergy = [632.86889648 , 63
     plt.tight_layout()
     plt.show()
 
-    return gaussPeakEnergy , gaussPeakCounts , tXVals , tYVals
 
+
+    return gaussPeakEnergy , gaussPeakCounts , troughVars[0] , np.abs(troughVars[1]-max(yCounts))
+
+################## Bq TIME #########################
+            
+def multGaussSet(xEnergy , yCounts , yUnc , gaussPeakEnergy = np.array([637.26196289 , 639.45849609 , 641.6550293 , 645.31591797]) ,
+                 tXVals = np.array([635.06542969 , 647.51245117])):
+
+    '''
+    Inputs: xEnergy - energy bins of interest
+            yCounts - Counts for energy bins of interest
+            yUnc - sqrt of yCounts (uncertainty in counts)
+            peakTargets - known values of isotopes to be analyzed
+            troughTargets - border values around the peak cluster of interest
+            
+    Returns: gaussPeakEnergy - energies of the peaks of interest
+            gaussPeakCounts - Counts for the peaks of interest
+            tXVals - energies of the border values
+            tYVals - counts of the border values
+
+    NOTE: After using this function on some well defined spectra and fitting gaussians as intended,
+            I am using the values of energy for those peaks on the other spectra to see if it will fit
+            a similar gaussian cluster
+    '''
+
+    peakIndices = [np.where(np.isclose(xEnergy, e))[0][0] for e in gaussPeakEnergy]
+
+    gaussPeakCounts = np.array(yCounts[peakIndices])
+
+    troughIndices = [np.where(np.isclose(xEnergy, e))[0][0] for e in tXVals]
+
+    tYVals = np.array(yCounts[troughIndices])
+
+    width = (tXVals[1] - tXVals[0])/4
+
+    
+
+    model = (
+        bq.fitting.GaussModel(prefix="gauss0_")
+        + bq.fitting.GaussModel(prefix="gauss1_")
+        + bq.fitting.GaussModel(prefix="gauss2_")
+        + bq.fitting.GaussModel(prefix="gauss3_")
+        + lmfit.models.LinearModel(prefix="line_")
+    )
+            
+    params = {
+        "gauss0_amp": gaussPeakCounts[0],
+        "gauss0_mu": gaussPeakEnergy[0],
+        "gauss0_sigma": width,
+        "gauss1_amp": gaussPeakCounts[1],
+        "gauss1_mu": gaussPeakEnergy[1],
+        "gauss1_sigma": width,
+        "gauss2_amp": gaussPeakCounts[2],
+        "gauss2_mu": gaussPeakEnergy[2],
+        "gauss2_sigma": width,
+        "gauss3_amp": gaussPeakCounts[3],
+        "gauss3_mu": gaussPeakEnergy[3],
+        "gauss3_sigma": width,
+        "line_slope": (tYVals[1]-tYVals[0])/(tXVals[1]-tXVals[0]),
+        "line_intercept": tYVals[0] - ((tYVals[1]-tYVals[0])/(tXVals[1]-tXVals[0])) * tXVals[0],
+    }
+            
+    fitter = bq.Fitter(
+        model,
+        x = xEnergy ,
+        y = yCounts,
+        y_unc = yUnc,
+        roi=(tXVals[0] , tXVals[1]),
+    )
+            
+    fitter.params["gauss0_mu"].set(value=gaussPeakEnergy[0])
+    fitter.params["gauss1_mu"].set(value=gaussPeakEnergy[1])
+    fitter.params["gauss2_mu"].set(value=gaussPeakEnergy[2])
+    fitter.params["gauss3_mu"].set(value=gaussPeakEnergy[3])
+    fitter.fit()
+    fitter.custom_plot()
+    plt.tight_layout()
+    plt.show()
+
+    
+
+    return gaussPeakEnergy , gaussPeakCounts , tXVals , tYVals
 
 
 def main(pcf_file: str , loud = 0):
@@ -484,23 +507,36 @@ def main(pcf_file: str , loud = 0):
             
             for i in range(len(energy)):
                 
-                if 600 < energy[i] < 700:
+                if 634.33325195 <= energy[i] < 648.24462891:
                     
                     filteredEnergy.append(energy[i])
+
+                    filteredEnergy.append(energy[i] + (energy[i+1]-energy[i])/4)
+
+                    filteredEnergy.append(energy[i] + (energy[i+1]-energy[i])/2)
+
+                    filteredEnergy.append(energy[i] + 3*(energy[i+1]-energy[i])/4)
             
                     filteredCPS.append(cps[i])
 
-                    filteredCounts.append(counts[i])
+                    filteredCounts.append(counts[i]/4)
+
+                    filteredCounts.append((counts[i] + (counts[i+1]-counts[i])/4)/4)
+
+                    filteredCounts.append((counts[i] + (counts[i+1]-counts[i])/2)/4)
+
+                    filteredCounts.append((counts[i] + 3*(counts[i+1]-counts[i])/4)/4)
 
                     filteredChannels.append(channels[i])
 
-                    if counts[i] == 0:
+            for i in filteredCounts:
+                if i == 0:
                         
-                        uncert.append(1.0)
+                    uncert.append(1.0)
                         
-                    else:
+                else:
                         
-                        uncert.append(np.sqrt(counts[i]))
+                    uncert.append(np.sqrt(i))
 
                     
             filteredEnergy = np.array(filteredEnergy)
@@ -539,13 +575,17 @@ def main(pcf_file: str , loud = 0):
             energy calibrations.
             '''
             
-            graphVars = multGauss(filteredEnergy , filteredCounts , uncert , [EPu239 , EPu240] , [633.60 , 646.0])
+            #oneGauss(filteredEnergy , filteredCounts , uncert)
             
-            #graphVars = multGaussSet(filteredEnergy , filteredCounts , uncert)
+            #graphVars = multGauss(filteredEnergy , filteredCounts , uncert , [EPu239 , EPu240] , [633.60 , 646.0])
+            
+            graphVars = multGaussSet(filteredEnergy , filteredCounts , uncert)
             
             break                                # End loop
             
     if loud:
+
+        print(graphVars[2])
 
         num_ticks = 10 # Increase for more tick marks
 
@@ -556,13 +596,12 @@ def main(pcf_file: str , loud = 0):
         plt.figure(figsize=(10, 5))
 
         plt.plot(graphVars[0] , graphVars[1] , marker='x', linestyle='none')
-        
         plt.xticks(xticks)  # Apply custom x-ticks
         plt.grid(True)
         plt.axvline(x=EPu240, ymin=0, ymax=1, label = 'Pu240' , color = 'orange')
         plt.axvline(x=EPu239, ymin=0, ymax=1, label = 'Pu239' , color = 'yellow')
-        plt.axvline(x=Am241Lower, ymin=0, ymax=1, color = 'red')
-        plt.axvline(x=Am241Upper, ymin=0, ymax=1, label = 'Am241' , color = 'red')
+        #plt.axvline(x=Am241Lower, ymin=0, ymax=1, color = 'red')
+        #plt.axvline(x=Am241Upper, ymin=0, ymax=1, label = 'Am241' , color = 'red')
         plt.step(filteredEnergy , filteredCounts , label = 'Spectrum' , color = 'grey')
         plt.yscale('log')
 
@@ -578,9 +617,51 @@ def main(pcf_file: str , loud = 0):
                 
     return filteredChannels , filteredEnergy , filteredCPS , filteredCounts , uncert , ratio , mass , shield , distance , age , shThic
 
-file1 = "Box/2025 Sr Design - Info Barriers/Synthetic Spectra/ . . ."
+
+file1 = "Box/2025 Sr Design - Info Barriers/Synthetic Spectra/Pu_Bare_Det60cm_HPGe_outps/Pu_Bare_Det60cm_HPGe_CPS_tally18.pcf"
+
+file2 = "Box/2025 Sr Design - Info Barriers/Synthetic Spectra/Pu_Steel7.5cm_Det60cm_HPGe_outps/Pu_Steel7.5cm_Det60cm_HPGe_CPS_tally18.pcf"
+
+file3 = "Box/2025 Sr Design - Info Barriers/Synthetic Spectra/Pu_Lead0.7cm_Det60cm_HPGe_outps/Pu_Lead0.7cm_Det60cm_HPGe_CPS_tally18.pcf"
+
+file4 = "Box/2025 Sr Design - Info Barriers/Synthetic Spectra/Pu_HDPE4.0cm_Det100cm_HPGe_outps/Pu_HDPE4.0cm_Det100cm_HPGe_CPS_tally18.pcf"
+
+file5 = "Box/2025 Sr Design - Info Barriers/Synthetic Spectra/Pu_Bare_Det60cm_HPGe_outps/Pu_Bare_Det60cm_HPGe_CPS_tally118.pcf"
+
+CZTFile = "Box/2025 Sr Design - Info Barriers/CZT Outputs/Test Source. Cs137 1cm.spe"
+
+
 
 if __name__ == "__main__":
 
+    main(file1 , 1)
+    
     main(file2, 1)
 
+    main(file3, 1)
+
+    main(file4, 1)
+
+    main(file5, 1)
+
+'''
+
+    main(CZTFile, 1)
+
+    Starting point for full cluster and 239: 635.06542969
+
+    Starting point for 2 peaks of cluster and 239: 637.99414062
+
+    Starting point for 240 and 239 peaks: 641.6550293
+
+    Ending point including 239: 647.51245117
+
+    Peak 1: 637.26196289
+
+    Peak 2: 639.45849609
+
+    Peak 3: 641.6550293
+
+    Peak 4: 645.31591797
+    
+'''
