@@ -97,27 +97,6 @@ def parse_title(spectrum_title: str) -> dict[str, Any]:
 
 ##############
 
-def ratioCalc(IPu239 , IPu240):
-
-    '''
-    Inputs: Intensity of Pu239 emissions at 645 keV and of 240 at 642 keV
-    This will need an intensity from the Pu239 and 240 peaks to glean an isotopic ratio of the two
-
-    NOTE: This is calculating an atomic ratio of the two based on the intensity of the 2 isotopes.
-    The tricky bit is deconvoluting the spectrum into individual peaks for these emissions and using those peak
-    areas along with their relative efficiency differences to find these intensities.
-    '''
-
-    lambda239 = np.log(2)/(24119 * 365 * 24 * 60 *60) #lambda from halflife of Pu239 in seconds 
-
-    lambda240 = np.log(2)/(6564 * 365 * 24 * 60 *60) #lambda from halflife of Pu234 in seconds
-
-    Bi_Pu240_642keV = 1.26 * 10 ** -7 #Branching Intensity for Pu240 emission of 642.48 keV
-
-    Bi_Pu239_645keV = 1.489 * 10 ** -7 #Branching Intensity for Pu239 emission of 645.97 keV
-
-    return IPu239 * (Bi_Pu239_645keV + Bi_Pu240_642keV) * 24119 / ((IPu239 + IPu240) * Bi_Pu239_645keV * (24119 + 6564))
-
 ### \/\/\/ LEO'S STUFF \/\/\/ #######################################
 
 #Tailing amplitude function
@@ -179,8 +158,36 @@ def summation(j=239):
 
 ### /\/\/\ LEO'S STUFF /\/\/\ #######################################
 
+def ratioCalc(IPu239 , IPu240):
 
-def nearestPeak(targets , xEnergy , yCounts , spread = 1):
+    '''
+    Inputs: Intensity of Pu239 emissions at 645 keV and of 240 at 642 keV
+    This will need an intensity from the Pu239 and 240 peaks to glean an isotopic ratio of the two
+
+    NOTE: This is calculating an atomic ratio of the two based on the intensity of the 2 isotopes.
+    The tricky bit is deconvoluting the spectrum into individual peaks for these emissions and using those peak
+    areas along with their relative efficiency differences to find these intensities.
+
+    All values pulled from Brookhaven: https://www.nndc.bnl.gov/nudat3/dec_searchi.jsp
+
+    Pu239 has emission at 639.9 keV at 8.70E-6% intensity, possibly the middle peak
+    '''
+    t239 = 24110 # Half-life of Pu239 in years
+
+    t240 = 6561 # Half-life of Pu240 in years
+    
+    lambda239 = np.log(2)/(t239 * 365 * 24 * 60 *60) #lambda from halflife of Pu239 in seconds 
+
+    lambda240 = np.log(2)/(t240 * 365 * 24 * 60 *60) #lambda from halflife of Pu234 in seconds
+
+    Bi_Pu240_642keV = 1.248E-5 #Branching Intensity for Pu240 emission of 642.23 keV
+
+    Bi_Pu239_645keV = 1.52E-5 #Branching Intensity for Pu239 emission of 645.94 keV 
+
+    return IPu239 * (Bi_Pu239_645keV + Bi_Pu240_642keV) * t239 / ((IPu239 + IPu240) * Bi_Pu239_645keV * (t239 + t240))
+
+
+def nearestPeak(targets , xEnergy , yCounts):
 
     '''
     value: Array of energies of peaks of interest (i.e. for Pu239 value = 645.97 keV)
@@ -229,31 +236,6 @@ def peakVals(xEnergy , yCounts , focus=10):
 
     return allPeakE , allPeakC
 
-def oneGauss(xEnergy , yCounts , yUnc , troughTargets = [643.8515625 , 647.51245117]):
-
-    model = bq.fitting.GaussModel(prefix="gauss0_") + bq.fitting.LineModel(prefix="linear_")
-
-
-
-    # bin_indices = channels
-    # counts_vals = counts
-    # counts_uncs = square root of counts
-    
-    fitter = bq.Fitter(
-        model,
-        x = xEnergy,
-        y = yCounts,
-        y_unc = yUnc,
-        roi=(troughTargets[0], troughTargets[1]),
-    )
-
-    fitter.fit()
-
-    fitter.custom_plot()
-    plt.tight_layout()
-    plt.show()
-
-    return
 ################## Bq TIME #########################
             
 def multGauss(xEnergy , yCounts , yUnc , peakTargets , troughTargets):
@@ -354,15 +336,18 @@ def multGauss(xEnergy , yCounts , yUnc , peakTargets , troughTargets):
     return gaussPeakEnergy , gaussPeakCounts , troughVars[0] , np.abs(troughVars[1]-max(yCounts))
 
 ################## Bq TIME #########################
+
             
-def multGaussSet(xEnergy , yCounts , yUnc , gaussPeakEnergy = np.array([637.26196289 , 639.45849609 , 641.6550293 , 645.31591797]) ,
-                 tXVals = np.array([635.06542969 , 647.51245117])):
+def multGaussSet(xEnergy , yCounts , yUnc , gaussPeakEnergy = np.array([637.75 , 639.99 , 642.23 , 645.94]) ,
+                 tXVals = np.array([635.1 , 648.2])):
 
     '''
     Inputs: xEnergy - energy bins of interest
             yCounts - Counts for energy bins of interest
             yUnc - sqrt of yCounts (uncertainty in counts)
-            peakTargets - known values of isotopes to be analyzed
+            gaussPeakEnergy - known gamma emissions of Pu239 and Pu240 in our cluster of interest
+                * Pu239 emits a gamma at 637.7 keV and 637.8 keV, but the de-convolution cannot break these into 2 similarly sized peaks
+                    therefore I am calling this one emission at 637.75
             troughTargets - border values around the peak cluster of interest
             
     Returns: gaussPeakEnergy - energies of the peaks of interest
@@ -375,11 +360,11 @@ def multGaussSet(xEnergy , yCounts , yUnc , gaussPeakEnergy = np.array([637.2619
             a similar gaussian cluster
     '''
 
-    peakIndices = [np.where(np.isclose(xEnergy, e))[0][0] for e in gaussPeakEnergy]
+    peakIndices = [np.where(np.isclose(xEnergy, e , rtol=2e-04 , atol=1e-08))[0][0] for e in gaussPeakEnergy]
 
     gaussPeakCounts = np.array(yCounts[peakIndices])
 
-    troughIndices = [np.where(np.isclose(xEnergy, e))[0][0] for e in tXVals]
+    troughIndices = [np.where(np.isclose(xEnergy, e , rtol=2e-04 , atol=1e-08))[0][0] for e in tXVals]
 
     tYVals = np.array(yCounts[troughIndices])
 
@@ -419,19 +404,28 @@ def multGaussSet(xEnergy , yCounts , yUnc , gaussPeakEnergy = np.array([637.2619
         y_unc = yUnc,
         roi=(tXVals[0] , tXVals[1]),
     )
-            
+    
     fitter.params["gauss0_mu"].set(value=gaussPeakEnergy[0])
     fitter.params["gauss1_mu"].set(value=gaussPeakEnergy[1])
     fitter.params["gauss2_mu"].set(value=gaussPeakEnergy[2])
     fitter.params["gauss3_mu"].set(value=gaussPeakEnergy[3])
-    fitter.fit()
-    fitter.custom_plot()
+    #fitter.fit(backend="lmfit") # Comment out the fitter.fit() and uncomment this to see if the residuals decrease with an exponential background fit
+    #fitter.fit(backend="minuit-pml") #Also test this to see if it reduces error, last time it broke everything and made me tweak out
+    fitter.fit() # The std's increase as counts increase, I think it is statistically a bad thing when there are obvious trends in error with data like this
+    fitter.custom_plot(residual_type="sigma")
+    #fitter.custom_plot()
     plt.tight_layout()
     plt.show()
 
-    
+    result = fitter.result
 
-    return gaussPeakEnergy , gaussPeakCounts , tXVals , tYVals
+    amp_240 = result.params["gauss2_amp"].value
+    amp_239 = result.params["gauss3_amp"].value
+
+    fwhm240 = 2 * np.sqrt(2 * np.log(2)) * result.params["gauss2_sigma"].value
+    fwhm239 = 2 * np.sqrt(2 * np.log(2)) * result.params["gauss3_sigma"].value
+
+    return gaussPeakEnergy , gaussPeakCounts , tXVals , tYVals , amp_240 , amp_239 , fwhm240 , fwhm239
 
 
 def main(pcf_file: str , loud = 0):
@@ -472,8 +466,7 @@ def main(pcf_file: str , loud = 0):
     isWGPu_threshold = 0.07
     deadtime_frac_threshold = 0.10
 
-    ### Load spectra
-    #pcf_file = "Box/2025 Sr Design - Info Barriers/Synthetic Spectra/Pu_Bare_Det60cm_HPGe_outps/Pu_Bare_Det60cm_HPGe_CPS_tally8.pcf"
+
     spectra = load_spectra(pcf_file)
 
     ### Find the first WGPu spectrum with acceptable dead time
@@ -488,12 +481,12 @@ def main(pcf_file: str , loud = 0):
         # WGPu found with low enough dead time
         if info["PuRatio"] <= isWGPu_threshold and deadtime_frac <= deadtime_frac_threshold:
 
-            energy = np.array(spectrum.channelEnergies()[:-1])
-            counts = spectrum.gammaCounts()[:-1] # Remove last bin for reasons above!
-            counts = np.array(counts)            # Convert to np.array for quick array manipulation
+            energy = np.array(spectrum.channelEnergies())#[:-1]
+            energy = energy[1:]
+            counts = spectrum.gammaCounts()#[:-1] # Remove last bin for reasons above!
+            counts = np.array(counts)#[:-1]       # Convert to np.array for quick array manipulation
             cps = counts/livetime                # Convert to counts per second
             channels = np.arange(1 , len(counts) + 1) # Number of Channels
-            index=0
             
             filteredChannels = [] # Channels for 600-700 keV
             
@@ -558,15 +551,18 @@ def main(pcf_file: str , loud = 0):
                 info['shdor']
                 ) #This is turning information from parse_title into useful variables
 
-            EPu240 = 642.48 #keV
+            EPu240 = 642.23 #keV
             
-            EPu239 = 645.97 #keV
+            EPu239 = 645.94 #keV
+
+            cluster1 = 637.7
+
+            cluster2 = 637.8
+
+            cluster3 = 639.99 #keV
             
-            EPu239LB = 658.929 #keV
+            EPu239LB = 658.86 #keV
             
-            Am241Lower = 619 #keV
-            
-            Am241Upper = 662.42 #keV
                 
             '''    ^^^
             According to Plutonium Gamma-Ray Measurements for Mutual Reciprocal Inspections of
@@ -585,8 +581,6 @@ def main(pcf_file: str , loud = 0):
             
     if loud:
 
-        print(graphVars[2])
-
         num_ticks = 10 # Increase for more tick marks
 
         x_min , x_max = min(filteredEnergy) , max(filteredEnergy)
@@ -600,21 +594,22 @@ def main(pcf_file: str , loud = 0):
         plt.grid(True)
         plt.axvline(x=EPu240, ymin=0, ymax=1, label = 'Pu240' , color = 'orange')
         plt.axvline(x=EPu239, ymin=0, ymax=1, label = 'Pu239' , color = 'yellow')
-        #plt.axvline(x=Am241Lower, ymin=0, ymax=1, color = 'red')
-        #plt.axvline(x=Am241Upper, ymin=0, ymax=1, label = 'Am241' , color = 'red')
+        plt.axvline(x=cluster1, ymin=0, ymax=1, color = 'yellow')
+        plt.axvline(x=cluster2, ymin=0, ymax=1, color = 'yellow')
+        plt.axvline(x=cluster3, ymin=0, ymax=1, color = 'yellow')
         plt.step(filteredEnergy , filteredCounts , label = 'Spectrum' , color = 'grey')
         plt.yscale('log')
-
-        #plt.plot(xVals , yVals , marker='x', linestyle='none') #X markers on all peaks of interest
-        
         plt.plot(graphVars[2] , graphVars[3] , marker = 'o' , linestyle = 'none') #O markers on troughs around the triple gaussians
-        
         plt.title(f'{age} Year Aged, {mass}g Sample of {100 - 100 * ratio:.2f}% Pu239/Pu240 with {shThic}cm of {shield} Shielding Taken {distance}cm From Source')
         plt.xlabel('Energy (keV)')
         plt.ylabel('Counts/Second')
         plt.legend()
         plt.show()
-                
+
+        amp240 , amp239 , fwhm240 , fwhm239 = graphVars[4] , graphVars[5] , graphVars[6] , graphVars[7]
+
+        print(ratioCalc(amp239 , amp240))
+        
     return filteredChannels , filteredEnergy , filteredCPS , filteredCounts , uncert , ratio , mass , shield , distance , age , shThic
 
 
@@ -635,6 +630,8 @@ CZTFile = "Box/2025 Sr Design - Info Barriers/CZT Outputs/Test Source. Cs137 1cm
 if __name__ == "__main__":
 
     main(file1 , 1)
+
+
     
     main(file2, 1)
 
@@ -648,20 +645,5 @@ if __name__ == "__main__":
 
     main(CZTFile, 1)
 
-    Starting point for full cluster and 239: 635.06542969
-
-    Starting point for 2 peaks of cluster and 239: 637.99414062
-
-    Starting point for 240 and 239 peaks: 641.6550293
-
-    Ending point including 239: 647.51245117
-
-    Peak 1: 637.26196289
-
-    Peak 2: 639.45849609
-
-    Peak 3: 641.6550293
-
-    Peak 4: 645.31591797
     
 '''
