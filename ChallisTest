@@ -158,7 +158,7 @@ def summation(j=239):
 
 ### /\/\/\ LEO'S STUFF /\/\/\ #######################################
 
-def ratioCalc(IPu239 , IPu240):
+def ratioCalc(Amp239 , Amp240):
 
     '''
     Inputs: Intensity of Pu239 emissions at 645 keV and of 240 at 642 keV
@@ -180,12 +180,11 @@ def ratioCalc(IPu239 , IPu240):
 
     lambda240 = np.log(2)/(t240 * 365 * 24 * 60 *60) #lambda from halflife of Pu234 in seconds
 
-    Bi_Pu240_642keV = 1.248E-5 #Branching Intensity for Pu240 emission of 642.23 keV
+    Bi_Pu240_642 = 1.248E-5 #Branching Intensity for Pu240 emission of 642.23 keV
 
-    Bi_Pu239_645keV = 1.52E-5 #Branching Intensity for Pu239 emission of 645.94 keV 
+    Bi_Pu239_645 = 1.52E-5 #Branching Intensity for Pu239 emission of 645.94 keV 
 
-    return IPu239 * (Bi_Pu239_645keV + Bi_Pu240_642keV) * t239 / ((IPu239 + IPu240) * Bi_Pu239_645keV * (t239 + t240))
-
+    return (Amp239/(lambda239 * Bi_Pu239_645)) / ((Amp239/(lambda239 * Bi_Pu239_645)) + (Amp240/(lambda240 * Bi_Pu240_642)))
 
 def nearestPeak(targets , xEnergy , yCounts):
 
@@ -589,26 +588,40 @@ def main(pcf_file: str , loud = 0):
         
         plt.figure(figsize=(10, 5))
 
-        plt.plot(graphVars[0] , graphVars[1] , marker='x', linestyle='none')
+        
         plt.xticks(xticks)  # Apply custom x-ticks
         plt.grid(True)
-        plt.axvline(x=EPu240, ymin=0, ymax=1, label = 'Pu240' , color = 'orange')
-        plt.axvline(x=EPu239, ymin=0, ymax=1, label = 'Pu239' , color = 'yellow')
-        plt.axvline(x=cluster1, ymin=0, ymax=1, color = 'yellow')
-        plt.axvline(x=cluster2, ymin=0, ymax=1, color = 'yellow')
-        plt.axvline(x=cluster3, ymin=0, ymax=1, color = 'yellow')
-        plt.step(filteredEnergy , filteredCounts , label = 'Spectrum' , color = 'grey')
         plt.yscale('log')
-        plt.plot(graphVars[2] , graphVars[3] , marker = 'o' , linestyle = 'none') #O markers on troughs around the triple gaussians
         plt.title(f'{age} Year Aged, {mass}g Sample of {100 - 100 * ratio:.2f}% Pu239/Pu240 with {shThic}cm of {shield} Shielding Taken {distance}cm From Source')
         plt.xlabel('Energy (keV)')
         plt.ylabel('Counts/Second')
+        plt.step(filteredEnergy , filteredCounts , color = 'black')
+        plt.axvline(x=EPu240, ymin=0, ymax=1 , color = 'orange')
+        plt.axvline(x=EPu239, ymin=0, ymax=1 , color = 'orange')
+        plt.axvline(x=cluster1, ymin=0, ymax=1, color = 'orange')
+        plt.axvline(x=cluster2, ymin=0, ymax=1, color = 'orange')
+        plt.axvline(x=cluster3, ymin=0, ymax=1, color = 'orange')
+        plt.plot(graphVars[0] , graphVars[1] , marker='x', linestyle='none' , color = 'tab:blue')
+        plt.plot(graphVars[2] , graphVars[3] , marker = 'o' , linestyle = 'none' , color = 'tab:blue' ,
+                 label = 'Range of Interest for De-Convolution') #O markers on troughs around the triple gaussians
         plt.legend()
         plt.show()
 
         amp240 , amp239 , fwhm240 , fwhm239 = graphVars[4] , graphVars[5] , graphVars[6] , graphVars[7]
 
-        print(ratioCalc(amp239 , amp240))
+        calcRatio = ratioCalc(amp239 , amp240)
+
+        error = np.abs((1-ratio)-calcRatio)/(1-ratio) * 100
+
+        print('Pu239 Atomic Percent from Calculation:' , calcRatio*100)
+        print('Actual Pu239 Atomic Percent:' , (1-ratio)*100)
+        print('Error:' , error , '%')
+        
+        
+        if calcRatio >= 0.93:
+            print('Algorithm Produces Green Light')
+        else:
+            print('Algorithm Produces Red Light')
         
     return filteredChannels , filteredEnergy , filteredCPS , filteredCounts , uncert , ratio , mass , shield , distance , age , shThic
 
