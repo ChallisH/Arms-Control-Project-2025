@@ -1,0 +1,756 @@
+### Example script for reading files with SpecUtils
+### Created 02/11/2025
+import warnings
+
+import lmfit
+import becquerel as bq
+import SpecUtils
+import math
+import numpy as np
+import scipy
+import matplotlib.pyplot as plt
+from scipy.stats import norm
+from typing import Any
+
+#help(specutils.utils.wcs_utils)
+
+########## FROM Becquerels Example ###############
+
+%matplotlib inline
+plt.rcParams["figure.facecolor"] = "white"
+
+%load_ext autoreload
+%autoreload 2
+
+np.random.seed(0)
+
+warnings.filterwarnings("ignore")
+
+
+
+##############
+
+def load_spectra(path_to_spectra: str) -> SpecUtils.SpecFile():
+    """
+    Loads spectrum file automatically for a given file type.
+    SpecUtils.ParserType.Auto will try to automatically determine
+    the file extension, so verify you are loading a compatible file"""
+
+    spec_file = SpecUtils.SpecFile()
+    try:
+        spec_file.loadFile(path_to_spectra, SpecUtils.ParserType.Auto)
+        return spec_file
+
+    except RuntimeError as e:
+        raise Exception(f"Failed to decode file: {e}")
+
+    return
+
+def parse_title(spectrum_title: str) -> dict[str, Any]:
+    """
+    Parses all the information in my (Tanner's) .pcf file titles
+    and loads it into a dictionary.
+
+    A few notes:
+        1. There is a bit of information here not useful for the
+           arm control information barriers project but is here
+           because of another project. You will not need things like
+           nps, U235 content, etc.
+        2. Pu239, Pu240, and other isotopics are weight fractions
+           are represented as NEGATIVE NUMBERS and you might want to
+           switch them back to positive.
+        3. det_max_erg is in MeV, but its more common to use keV.
+        4. PuRatio is just the ratio of Pu240/Pu239 and is positive
+           already since, yknow, negative divided by a negative.
+        5. NPS is a relic. Ignore, as it makes no sense in this context.
+        6. Titles are unique to the person/software that generated the
+           spectrum. If/when you use another detector or input a spectrum
+           I did not provide, the title will be different and this function
+           will not work.
+
+    Args:
+        spectrum_title: spectrum title as string
+
+    Returns:
+        Dictionary containing what the spectrum represents
+    """
+
+    try: # This is to ensure the code still works if given a file without Tanner's naming convention
+        
+        snm, U232, U235, U238, Pu239, Pu240, Pu241, PuRatio, age, snmir, snmor, \
+        U_mass, Pu_mass, shd_mat, shdor, det_type, det_dist, det_bins, det_max_erg, \
+        nps = spectrum_title.split("_")
+
+        return {"snm":	snm, "U232": float(U232), "U235": float(U235), "U238": float(U238), "Pu239": float(Pu239),
+            "Pu240": float(Pu240), "Pu241": float(Pu241), "PuRatio": float(PuRatio), "age": int(age),
+            "snmir": float(snmir), "snmor": float(snmor), "U_mass": float(U_mass), "Pu_mass": float(Pu_mass),
+            "shd_mat": shd_mat, "shdor": float(shdor), "det_type": det_type, "det_dist": float(det_dist),
+            "det_bins": int(det_bins), "det_max_erg": float(det_max_erg), "nps": nps }
+        
+    except: # If the file title doesn't have Tanner's style, these will be the returned values, all numbers are 0's and all strings say 'N/A'
+        
+        return {"snm":	'N/A', "U232": 0, "U235": 0, "U238": 0, "Pu239": 0,
+            "Pu240": 0, "Pu241": 0, "PuRatio": 0, "age": 0,
+            "snmir": 0, "snmor": 0, "U_mass": 0, "Pu_mass": 0,
+            "shd_mat": 'N/A', "shdor": 0, "det_type": 'N/A', "det_dist": 0,
+            "det_bins": 0, "det_max_erg": 0, "nps": 'N/A' }
+
+##############
+
+### \/\/\/ LEO'S STUFF \/\/\/ #######################################
+
+#Tailing amplitude function
+#x is channel
+#A and C are tailing amplitude parameters
+#B and D are parameters that describe two tailing slopes
+#deel is del which reduces T to zero at the peak position
+def bigT(channelw,xi,xo,deel=1, A=1, B=1, C=1, D=1):
+    x=(xi-xo)/channelw
+    T=(deel*(A*math.exp(B*x)+C*math.exp(D*x))*(1-math.exp(0.4*(x**2))))
+    return T
+
+#Net counts in a channel function
+#Yi is the net counts output
+#Yo is the peak height at the peak position
+#a is alpha or the peak width parameter
+#bigT calls the tailing amplitiude fucntion 
+def netCounts( Yo, a, xi, xo, channelw):
+
+    Yi = Yo*(math.exp(a*((xi-xo)**2))+bigT(channelw,xi,xo))
+    return Yi
+
+#sigtsq is the total peak width at half maximum squared
+#noise is the contributions due to detector noise
+
+
+def alpha(sigtsq):
+    a=(-.5)*(sigtsq)
+    return a
+
+def sigmat(noise,sigs,E):
+    sigtq=(noise)+(sigs*E)
+    return sigtq
+
+#intrinsic efficiency
+#area of the peak function
+
+def IntrinsicEfficiencypeakarea(isotope, Xk, AM, PuM, b=1,c=1):
+    Bj, Ej, eff, mewjA, mewjPu =summation(isotope)
+    Aj=(((Bj*Xk)*math.exp(-mewjA*AM))*((1/(mewjPu))*(1-math.exp(-mewjPu*PuM)))*(eff*(1+b*Ej+c*(Ej**2))))
+
+    return Aj, Bj
+
+def summation(j=239):
+
+    mewjA=8.04*10**-2
+    mewjPu=.137
+
+    if j == 239 or j== 645.969:
+        Bj=1.489*10**-7
+        Ej=645.969 #keV
+        eff=1
+        return Bj,Ej, eff, mewjA,mewjPu
+    if j == 240 or j == 642.500:
+        Bj=1.26*10**-7
+        Ej=642.500 #keV
+        eff=1
+        return Bj,Ej,eff, mewjA,mewjPu
+
+### /\/\/\ LEO'S STUFF /\/\/\ #######################################
+
+def ratioCalc(Amp239 , Amp240):
+
+    '''
+    Inputs: Intensity of Pu239 emissions at 645 keV and of 240 at 642 keV
+    This will need an intensity from the Pu239 and 240 peaks to glean an isotopic ratio of the two
+
+    NOTE: This is calculating an atomic ratio of the two based on the intensity of the 2 isotopes.
+    The tricky bit is deconvoluting the spectrum into individual peaks for these emissions and using those peak
+    areas along with their relative efficiency differences to find these intensities.
+
+    All values pulled from Brookhaven: https://www.nndc.bnl.gov/nudat3/dec_searchi.jsp
+
+    Pu239 has emission at 639.9 keV at 8.70E-6% intensity, possibly the middle peak
+    '''
+    t239 = 24110 # Half-life of Pu239 in years
+
+    t240 = 6561 # Half-life of Pu240 in years
+    
+    lambda239 = np.log(2)/(t239 * 365 * 24 * 60 *60) #lambda from halflife of Pu239 in seconds 
+
+    lambda240 = np.log(2)/(t240 * 365 * 24 * 60 *60) #lambda from halflife of Pu234 in seconds
+
+    Bi_Pu240_642 = 1.248E-5 #Branching Intensity for Pu240 emission of 642.23 keV
+
+    Bi_Pu239_645 = 1.52E-5 #Branching Intensity for Pu239 emission of 645.94 keV 
+
+    return (Amp239/(lambda239 * Bi_Pu239_645)) / ((Amp239/(lambda239 * Bi_Pu239_645)) + (Amp240/(lambda240 * Bi_Pu240_642)))
+
+def nearestPeak(targets , xEnergy , yCounts):
+
+    '''
+    value: Array of energies of peaks of interest (i.e. for Pu239 value = 645.97 keV)
+    
+    array: channels or energies of interest (filteredEnergy is my default)
+    
+    dps: CPS array without background, I linearly subtracted background from my OG CPS array
+    and created CPSNoBkrnd as my default
+        
+    spread: Number of points before and after the peak that should be used for creating the 
+            polynomial fit. My default is 2 because a lot of these peaks appear to have 2 points
+            before and after the apex that are relatively unaffected by the other emissions
+
+    Returns:
+
+        Curve - Array of CPS or Counts to be plotted with the original spectrum
+
+        Indices - The indices of the 
+                    
+    '''
+
+    xVals = []
+
+    yVals = []
+
+    index = 0
+
+    for i in targets:
+
+        index = np.argmin((np.abs(xEnergy-i)))
+
+        xVals.append(xEnergy[index])
+
+        yVals.append(yCounts[index])
+
+    return xVals , yVals
+    
+
+def peakVals(xEnergy , yCounts , focus=10):
+    
+    peakIdx = scipy.signal.find_peaks(yCounts , height = focus)[0]
+
+    allPeakE = xEnergy[peakIdx]
+
+    allPeakC = yCounts[peakIdx]
+
+    return allPeakE , allPeakC
+
+################## Bq TIME #########################
+            
+def multGauss(xEnergy , yCounts , yUnc , peakTargets , troughTargets):
+
+    '''
+    Inputs: xEnergy - energy bins of interest
+            yCounts - Counts for energy bins of interest
+            yUnc - sqrt of yCounts (uncertainty in counts)
+            peakTargets - known values of isotopes to be analyzed
+            troughTargets - border values around the peak cluster of interest
+            
+    Returns: gaussPeakEnergy - energies of the peaks of interest
+            gaussPeakCounts - Counts for the peaks of interest
+            tXVals - energies of the border values
+            tYVals - counts of the border values
+
+    NOTE: After using this function on some well defined spectra and fitting gaussians as intended,
+            I am using the values of energy for those peaks on the other spectra to see if it will fit
+            a similar gaussian cluster
+    '''
+
+    peakVars , troughVars = peakVals(xEnergy , yCounts) , peakVals(xEnergy , -yCounts + max(yCounts) , focus = 50)
+
+    peakEnergy , peakCounts = peakVars[0] , peakVars[1]
+
+    PP = nearestPeak(peakTargets , peakVars[0] , peakVars[1])
+
+    TP = nearestPeak(troughTargets , troughVars[0] , np.abs(troughVars[1]-max(yCounts)))
+
+    xVals , yVals = PP[0] , PP[1]
+
+    tXVals , tYVals = TP[0] , TP[1]
+
+    gaussPeakEnergy = []
+
+    gaussPeakCounts = []
+
+    for i in range(len(peakEnergy)):
+
+        if tXVals[0] <= peakEnergy[i] <= tXVals[1]:
+
+            gaussPeakEnergy.append(peakEnergy[i])
+
+            gaussPeakCounts.append(peakCounts[i])
+
+    gaussPeakEnergy = np.array(gaussPeakEnergy)
+
+    gaussPeakCounts = np.array(gaussPeakCounts)
+
+    width = (tXVals[1] - tXVals[0])/4
+
+    
+
+    model = (
+        bq.fitting.GaussModel(prefix="gauss0_")
+        + bq.fitting.GaussModel(prefix="gauss1_")
+        + bq.fitting.GaussModel(prefix="gauss2_")
+        + bq.fitting.GaussModel(prefix="gauss3_")
+        + lmfit.models.LinearModel(prefix="line_")
+    )
+            
+    params = {
+        "gauss0_amp": gaussPeakCounts[0],
+        "gauss0_mu": gaussPeakEnergy[0],
+        "gauss0_sigma": width,
+        "gauss1_amp": gaussPeakCounts[1],
+        "gauss1_mu": gaussPeakEnergy[1],
+        "gauss1_sigma": width,
+        "gauss2_amp": gaussPeakCounts[2],
+        "gauss2_mu": gaussPeakEnergy[2],
+        "gauss2_sigma": width,
+        "gauss3_amp": gaussPeakCounts[3],
+        "gauss3_mu": gaussPeakEnergy[3],
+        "gauss3_sigma": width,
+        "line_slope": (tYVals[1]-tYVals[0])/(tXVals[1]-tXVals[0]),
+        "line_intercept": tYVals[0] - ((tYVals[1]-tYVals[0])/(tXVals[1]-tXVals[0])) * tXVals[0],
+    }
+            
+    fitter = bq.Fitter(
+        model,
+        x = xEnergy ,
+        y = yCounts,
+        y_unc = yUnc,
+        roi=(tXVals[0] , tXVals[1]),
+    )
+            
+    fitter.params["gauss0_mu"].set(value=gaussPeakEnergy[0])
+    fitter.params["gauss1_mu"].set(value=gaussPeakEnergy[1])
+    fitter.params["gauss2_mu"].set(value=gaussPeakEnergy[2])
+    fitter.params["gauss3_mu"].set(value=gaussPeakEnergy[3])
+    fitter.fit()
+    fitter.custom_plot()
+    plt.tight_layout()
+    plt.show()
+
+
+
+    return gaussPeakEnergy , gaussPeakCounts , troughVars[0] , np.abs(troughVars[1]-max(yCounts))
+
+################## Bq TIME #########################
+
+            
+def multGaussSet(xEnergy , yCounts , yUnc , gaussPeakEnergy = np.array([637.75 , 639.99 , 642.23 , 645.94]) ,
+                 tXVals = np.array([635.1 , 648.2]), loud = False):
+
+    '''
+    Inputs: xEnergy - energy bins of interest
+            yCounts - Counts for energy bins of interest
+            yUnc - sqrt of yCounts (uncertainty in counts)
+            gaussPeakEnergy - known gamma emissions of Pu239 and Pu240 in our cluster of interest
+                * Pu239 emits a gamma at 637.7 keV and 637.8 keV, but the de-convolution cannot break these into 2 similarly sized peaks
+                    therefore I am calling this one emission at 637.75
+            troughTargets - border values around the peak cluster of interest
+            
+    Returns: gaussPeakEnergy - energies of the peaks of interest
+            gaussPeakCounts - Counts for the peaks of interest
+            tXVals - energies of the border values
+            tYVals - counts of the border values
+
+    NOTE: After using this function on some well defined spectra and fitting gaussians as intended,
+            I am using the values of energy for those peaks on the other spectra to see if it will fit
+            a similar gaussian cluster
+    '''
+
+    peakIndices = [np.where(np.isclose(xEnergy, e , rtol=2e-04 , atol=1e-08))[0][0] for e in gaussPeakEnergy]
+
+    gaussPeakCounts = np.array(yCounts[peakIndices])
+
+    troughIndices = [np.where(np.isclose(xEnergy, e , rtol=2e-04 , atol=1e-08))[0][0] for e in tXVals]
+
+    tYVals = np.array(yCounts[troughIndices])
+
+    width = (tXVals[1] - tXVals[0])/4
+
+    
+
+    model = (
+        bq.fitting.GaussModel(prefix="gauss0_")
+        + bq.fitting.GaussModel(prefix="gauss1_")
+        + bq.fitting.GaussModel(prefix="gauss2_")
+        + bq.fitting.GaussModel(prefix="gauss3_")
+        + lmfit.models.LinearModel(prefix="line_")
+    )
+            
+    params = {
+        "gauss0_amp": gaussPeakCounts[0],
+        "gauss0_mu": gaussPeakEnergy[0],
+        "gauss0_sigma": width,
+        "gauss1_amp": gaussPeakCounts[1],
+        "gauss1_mu": gaussPeakEnergy[1],
+        "gauss1_sigma": width,
+        "gauss2_amp": gaussPeakCounts[2],
+        "gauss2_mu": gaussPeakEnergy[2],
+        "gauss2_sigma": width,
+        "gauss3_amp": gaussPeakCounts[3],
+        "gauss3_mu": gaussPeakEnergy[3],
+        "gauss3_sigma": width,
+        "line_slope": (tYVals[1]-tYVals[0])/(tXVals[1]-tXVals[0]),
+        "line_intercept": tYVals[0] - ((tYVals[1]-tYVals[0])/(tXVals[1]-tXVals[0])) * tXVals[0],
+    }
+            
+    fitter = bq.Fitter(
+        model,
+        x = xEnergy ,
+        y = yCounts,
+        y_unc = yUnc,
+        roi=(tXVals[0] , tXVals[1]),
+    )
+    
+    fitter.params["gauss0_mu"].set(value=gaussPeakEnergy[0])
+    fitter.params["gauss1_mu"].set(value=gaussPeakEnergy[1])
+    fitter.params["gauss2_mu"].set(value=gaussPeakEnergy[2])
+    fitter.params["gauss3_mu"].set(value=gaussPeakEnergy[3])
+    #fitter.fit(backend="lmfit") # Comment out the fitter.fit() and uncomment this to see if the residuals decrease with an exponential background fit
+    #fitter.fit(backend="minuit-pml") #Also test this to see if it reduces error, last time it broke everything and made me tweak out
+    fitter.fit() # The std's increase as counts increase, I think it is statistically a bad thing when there are obvious trends in error with data like this
+
+    if loud:  
+        fitter.custom_plot(residual_type="sigma")
+        #fitter.custom_plot()
+        plt.tight_layout()
+        plt.show()
+
+    result = fitter.result
+
+    amp_240 = result.params["gauss2_amp"].value
+    amp_239 = result.params["gauss3_amp"].value
+
+    fwhm240 = 2 * np.sqrt(2 * np.log(2)) * result.params["gauss2_sigma"].value
+    fwhm239 = 2 * np.sqrt(2 * np.log(2)) * result.params["gauss3_sigma"].value
+
+    return gaussPeakEnergy , gaussPeakCounts , tXVals , tYVals , amp_240 , amp_239 , fwhm240 , fwhm239
+
+
+def main(pcf_file: str , loud = 0):
+    
+    '''
+    Inputs: String directing funtion where to pull spectra from
+
+    Returns:
+    
+            filteredChannels = array of channels for energies from 600-700keV
+            filteredEnergy = array of energy bins from 600-700keV 
+            filteredCPS = array of counts per second
+            filteredCounts = array of counts
+            uncert = array of square root of counts (uncertainty in each count)
+            
+    Below is an example of opening a .PCF file which contains 350 spectra,
+    finding a single WGPu spectrum, converting the counts to CPS, and printing
+    CPS in each bin/channel
+
+    ********
+    WARNING! Because of a hiccup in my simulations on my other project, there
+    are 4097 bins in each spectrum when you should only use 4096. For context,
+    this happened because I needed to match my GADRAS-DRF and MCNP simulations.
+
+    You MUST make sure you remove the last channel whenever you grab counts
+    from this dataset!
+
+    Example:
+
+    >>> counts_per_bin = [0, 1, ..., 20, 3]
+    >>> counts_per_bin_except_last = counts_per_bin[:-1]
+    >>> counts_per bin_except_last
+    >>>
+    >>> [0, 1, ..., 20]
+    '''
+
+    ### Define a few constants (just an example, choose what you want/need)
+    #isWGPu_threshold = 0.07
+    #deadtime_frac_threshold = 0.10
+
+
+    spectra = load_spectra(pcf_file)
+    results = []
+    error_list = []
+    false_positive = 0
+    false_negative = 0
+    
+    ### Find the first WGPu spectrum with acceptable dead time
+    for i in range(spectra.numMeasurements()):
+
+        spectrum = spectra.measurement(i)        # Get single measurement i.e., spectrum
+        info = parse_title(spectrum.title())     # Get info from the title
+        livetime = spectrum.liveTime()           # Get live time
+        realtime = spectrum.realTime()           # Get real time
+        deadtime_frac = (1-livetime/realtime)    # E.g., if live 10 secs but real 100 secs, deadtime frac = 90%
+
+        # WGPu found with low enough dead time
+        # if info["PuRatio"] <= isWGPu_threshold and deadtime_frac <= deadtime_frac_threshold:
+
+        energy = np.array(spectrum.channelEnergies())#[:-1]
+        energy = energy[1:]
+        counts = spectrum.gammaCounts()#[:-1] # Remove last bin for reasons above!
+        counts = np.array(counts)#[:-1]       # Convert to np.array for quick array manipulation
+        cps = counts/livetime                # Convert to counts per second
+        channels = np.arange(1 , len(counts) + 1) # Number of Channels
+        
+        filteredChannels = [] # Channels for 600-700 keV
+        
+        filteredEnergy = [] # Energy bins for 600-700 keV
+        
+        filteredCPS = [] # Counts per second at each bin from 600-700 keV
+
+        filteredCounts = [] # Counts at each bin from 600-700 keV
+
+        uncert = [] # Sqrt of counts (uncertainty in counts)
+        
+        for i in range(len(energy)):
+            
+            if 634.33325195 <= energy[i] < 648.24462891:
+                
+                filteredEnergy.append(energy[i])
+
+                filteredEnergy.append(energy[i] + (energy[i+1]-energy[i])/4)
+
+                filteredEnergy.append(energy[i] + (energy[i+1]-energy[i])/2)
+
+                filteredEnergy.append(energy[i] + 3*(energy[i+1]-energy[i])/4)
+        
+                filteredCPS.append(cps[i])
+
+                filteredCounts.append(counts[i]/4)
+
+                filteredCounts.append((counts[i] + (counts[i+1]-counts[i])/4)/4)
+
+                filteredCounts.append((counts[i] + (counts[i+1]-counts[i])/2)/4)
+
+                filteredCounts.append((counts[i] + 3*(counts[i+1]-counts[i])/4)/4)
+
+                filteredChannels.append(channels[i])
+
+        for i in filteredCounts:
+            if i == 0:
+                    
+                uncert.append(1.0)
+                    
+            else:
+                    
+                uncert.append(np.sqrt(i))
+
+                
+        filteredEnergy = np.array(filteredEnergy)
+        
+        filteredCPS = np.array(filteredCPS)
+
+        filteredCounts=np.array(filteredCounts)
+
+        filteredChannels = np.array(filteredChannels)
+
+        uncert = np.array(uncert)
+
+        ratio, mass, shield, distance, age , shThic = (
+            info['PuRatio'], 
+            info['Pu_mass'], 
+            info['shd_mat'], 
+            info['det_dist'],
+            info['age'],
+            info['shdor']
+            ) #This is turning information from parse_title into useful variables
+
+        EPu240 = 642.23 #keV
+        
+        EPu239 = 645.94 #keV
+
+        cluster1 = 637.7
+
+        cluster2 = 637.8
+
+        cluster3 = 639.99 #keV
+        
+        EPu239LB = 658.86 #keV
+        
+            
+        '''    ^^^
+        According to Plutonium Gamma-Ray Measurements for Mutual Reciprocal Inspections of
+        Dismantled Nuclear Weapons, these are all the Pu240, Pu239, and Am241 energies of
+        significance. Pu239LB is for lower bound estimations. The Am241 emissions are used for
+        energy calibrations.
+        '''
+        
+        #oneGauss(filteredEnergy , filteredCounts , uncert)
+        
+        #graphVars = multGauss(filteredEnergy , filteredCounts , uncert , [EPu239 , EPu240] , [633.60 , 646.0])
+        
+        graphVars = multGaussSet(filteredEnergy , filteredCounts , uncert, loud = False)
+        
+       # break                                # End loop
+        
+
+        # split real vs. interp indices
+        x = filteredEnergy
+        y = filteredCounts
+        idx_actual = np.arange(0, len(x), 4)
+        idx_interp = np.setdiff1d(np.arange(len(x)), idx_actual)
+    
+        if loud:
+            plt.figure(figsize=(10, 5))
+        
+            # 1) Full step curve (all data)
+            plt.step(
+                x, y,
+                where='mid',
+                label='data (step)',
+                color='gray',
+                linewidth=1
+            )
+        
+            # 2) Real bins as circles
+            plt.scatter(
+                x[idx_actual], y[idx_actual],
+                marker='o',
+                s=50,
+                label='measured bins',
+                color='black',
+                zorder=5
+            )
+        
+            # 3) Interpolated points as crosses
+            plt.scatter(
+                x[idx_interp], y[idx_interp],
+                marker='x',
+                s=40,
+                label='interpolated',
+                color='tab:orange',
+                zorder=5
+            )
+        
+            # 4) Known-peak vertical lines
+            for energy_line in (EPu240, EPu239, cluster1, cluster2, cluster3):
+                plt.axvline(
+                    x=energy_line,
+                    color='orange',
+                    linestyle='--',
+                    linewidth=1
+                )
+        
+            # styling
+            plt.yscale('log')
+            plt.xlabel('Energy (keV)')
+            plt.ylabel('Counts / second')
+            plt.title(
+                f'{age} Year Aged, {mass}g Sample of '
+                f'{100 - 100 * ratio:.2f}% Pu239/Pu240 with '
+                f'{shThic}cm of {shield} Shielding Taken {distance}cm From Source'
+            )
+            plt.grid(True, which='both', ls=':')
+            plt.legend()
+            plt.tight_layout()
+            plt.show()
+    
+    
+        amp240 , amp239 , fwhm240 , fwhm239 = graphVars[4] , graphVars[5] , graphVars[6] , graphVars[7]
+    
+        calcRatio = ratioCalc(amp239 , amp240)
+    
+        error = np.abs((1-ratio)-calcRatio)/(1-ratio) * 100
+        error_list.append(error)
+        
+        if calcRatio >= 0.93 and ratio < 0.93:
+            false_positive += 1
+        elif calcRatio < 0.93 and ratio >= 0.93:
+            false_negative += 1
+            
+        if loud: 
+            print(f'{age} Year Aged, {mass}g Sample of '
+                    f'{100 - 100 * ratio:.2f}% Pu239/Pu240 with '
+                    f'{shThic}cm of {shield} Shielding Taken {distance}cm From Source')
+               
+            print('Pu239 Atomic Percent from Calculation:' , calcRatio*100)
+            print('Actual Pu239 Atomic Percent:' , (1-ratio)*100)
+            print('Error:' , error , '%')
+            
+            if calcRatio >= 0.93:
+                print('Algorithm Produces Green Light')
+            else:
+                print('Algorithm Produces Red Light')
+            print('===============================================================================================================')
+        
+    return {
+        "errors": np.array(error_list),
+        "channels": filteredChannels,
+        "energy": filteredEnergy,
+        "cps": filteredCPS,
+        "counts": filteredCounts,
+        "uncertainty": uncert,
+        "ratio": ratio,
+        "mass": mass,
+        "shield": shield,
+        "distance": distance,
+        "age": age,
+        "shield_thickness": shThic,
+        "false_positive": false_positive,
+        "false_negative": false_negative
+    }
+
+
+
+#file1 = r"C:\Users\jrtes\Downloads\Pu_Bare_Det60cm_HPGe_CPS_tally98.pcf"
+
+#file2 = r"C:\Users\jrtes\OneDrive\Desktop\College Stuffs\Winter 2025\Capstone (NSE 474)\Synthetic Spectra\Synthetic Spectra\Pu_HDPE1.0cm_Det60cm_HPGe_outps\Pu_HDPE1.0cm_Det60cm_HPGe_CPS_tally28.pcf"
+
+#file3 = r"C:\Users\jrtes\OneDrive\Desktop\College Stuffs\Winter 2025\Capstone (NSE 474)\Synthetic Spectra\Synthetic Spectra\Pu_HDPE4.0cm_Det100cm_HPGe_outps\Pu_HDPE4.0cm_Det100cm_HPGe_CPS_tally18.pcf"
+
+#file4 = r"C:\Users\jrtes\OneDrive\Desktop\College Stuffs\Winter 2025\Capstone (NSE 474)\Test Source. Cs137 1cm.spe"
+
+
+
+
+
+#results1 = main(file1, 0)
+#file1_err = results1["errors"]
+
+#print("There are", len(file1_err) , "spectra")
+#print(file1_err)
+
+
+#Computure Nuker for Data
+
+import os
+import numpy as np
+
+# Replace with your actual main function if it's in another module
+# from your_module import main
+
+def process_all_pcf_files(root_dir):
+    all_errors = []
+
+    for dirpath, _, filenames in os.walk(root_dir):
+        for filename in filenames:
+            if filename.endswith(".pcf"):
+                filepath = os.path.join(dirpath, filename)
+                try:
+                    result = main(filepath, loud=0)
+                    false_positive = result["false_positive"] #grab the number of false positives 
+                    false_negative = result["false_negative"]
+                    errors = result["errors"]  # grab only error array
+                    all_errors.extend(errors)  # add to global list
+                    print(f"Processed {filename} with {len(errors)} errors.")
+                except Exception as e:
+                    print(f"Failed to process {filename}: {e}")
+
+    return result, np.array(all_errors) ,  false_positive ,  false_negative
+
+root_folder = r"C:\Users\jrtes\OneDrive\Desktop\College Stuffs\Winter 2025\Capstone (NSE 474)\Synthetic Spectra\Pu600Test Spectra"
+all_errors = process_all_pcf_files(root_folder)
+
+result, all_errors_array, total_false_positive, total_false_negative = all_errors
+
+
+spectra_errors = np.array(all_errors_array)
+
+print('========================================================================================')
+print(f"Total spectra processed: {len(spectra_errors)}")
+print(f"Total Average error: {np.mean(spectra_errors):.2f}%")
+print(f"Median error: {np.median(spectra_errors):.2f}%")
+print(f"Max error: {np.max(spectra_errors):.2f}%")
+print("Number of false positives:", total_false_positive)
+print("Number of false negatives:", total_false_negative)
