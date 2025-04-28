@@ -7,47 +7,56 @@ import matplotlib.pyplot as plt
 import becquerel as bq
 import lmfit
 import SpecUtils
+from scipy import stats
 
-# ─── 0) SIMPLE BIG‐PICTURE PLOT ────────────────────────────────────────────────
 def plot_full_spectrum(
     E_full: np.ndarray,
     C_full: np.ndarray,
-    x_lines: list[float],
     troughs: tuple[float,float] = (634.333, 648.245)
 ):
     """
-    Big‐picture 600–700 keV view:
-      • GADRAS Data (step)
-      • vertical markers at energies in x_lines
-      • shaded ROI between troughs
+    Big-picture 600–700 keV view:
+      • GADRAS data as a step plot
+      • specified vertical lines
+      • shaded ROI
+      • linear y-scale
     """
-    # drop extra edge if present
+    # align energies/counts
     if E_full.shape[0] == C_full.shape[0] + 1:
         E_data = E_full[:-1]
     else:
         E_data = E_full
 
-    fig, ax = plt.subplots(figsize=(10, 4))
+    # restrict to 600–700 keV
+    mask = (E_data >= 600) & (E_data <= 700)
+    x = E_data[mask]
+    y = C_full[mask]
 
-    ax.step(E_data, C_full, where="mid", color="black", label="GADRAS Data")
+    fig, ax = plt.subplots(figsize=(10,4))
 
-    # draw reference lines
-    for x in x_lines:
-        ax.axvline(x, color="tab:blue", linestyle="--", lw=1)
+    # step plot of the raw spectrum
+    ax.step(x, y, where="mid", color="black", label="GADRAS Data")
+
+    # vertical lines
+    ax.axvline(642.48, color="orange", linewidth=2, linestyle=":", label="Pu-240 (642.23)")
+    ax.axvline(645.97, color="cyan",   linewidth=2, linestyle=":", label="Pu-239 ( 645.)")  
+    ax.axvline(639.45, color="blue",   linewidth=2, linestyle=":", label="U-235 (639.45)")
+
 
     # ROI shading
-    ax.axvspan(troughs[0], troughs[1],
-               color="orange", alpha=0.1, label="ROI")
+    ax.axvspan(troughs[0], troughs[1], color="orange", alpha=0.1, label="ROI")
 
     ax.set_xlim(600, 700)
-    ax.set_yscale("log")
+    ax.set_yscale("linear")
     ax.set_xlabel("Energy (keV)")
     ax.set_ylabel("Counts")
-    ax.legend(loc="upper right")
+    ax.legend(loc="upper right", frameon=False)
     ax.grid(which="both", ls=":")
+
     plt.tight_layout()
     plt.show()
     plt.close(fig)
+    return fig
 
 
 # ─── 1) DATA CONTAINERS ────────────────────────────────────────────────────────
@@ -62,6 +71,7 @@ def multGaussSet(x, y, y_unc,
                  peaks=np.array([637.75, 639.99, 642.23, 645.94]),
                  troughs=np.array([635.1, 648.2]),
                  loud=False):
+    """Fit 4 Gaussians + linear BG, return everything for plotting/customization."""
     idx_pk = [np.argmin(np.abs(x - p)) for p in peaks]
     amps0  = y[idx_pk]
     idx_tr = [np.argmin(np.abs(x - t)) for t in troughs]
@@ -76,12 +86,12 @@ def multGaussSet(x, y, y_unc,
                       roi=(troughs[0], troughs[1]))
 
     for i, p in enumerate(peaks):
-        fitter.params[f"gauss{i}_mu"].set(value=p)
-        fitter.params[f"gauss{i}_amp"].set(value=amps0[i])
+        fitter.params[f"gauss{i}_mu"].set  (value=p)
+        fitter.params[f"gauss{i}_amp"].set (value=amps0[i])
         fitter.params[f"gauss{i}_sigma"].set(value=width)
 
     slope = (y_tr[1] - y_tr[0])/(troughs[1] - troughs[0])
-    fitter.params["line_slope"].set(value=slope)
+    fitter.params["line_slope"].set    (value=slope)
     fitter.params["line_intercept"].set(value=y_tr[0] - slope*troughs[0])
 
     fitter.fit()
@@ -97,8 +107,8 @@ def multGaussSet(x, y, y_unc,
         amp  = res.params[pref+"amp"].value
         mu   = res.params[pref+"mu"].value
         sig  = res.params[pref+"sigma"].value
-        yg   = amp * np.exp(-0.5*((x_fit - mu)/sig)**2)
-        ug   = np.sqrt(np.maximum(yg, 1e-6))
+        yg   = amp * np.exp(-0.5*((x_fit-mu)/sig)**2)
+        ug   = np.sqrt(np.maximum(yg,1e-6))
         indiv[f"gauss{i}"] = {"energy": x_fit, "counts": yg, "uncertainty": ug}
 
     amp239 = res.params["gauss3_amp"].value
@@ -135,7 +145,7 @@ def load_and_filter(pcf_file: str):
                     ])
             x4 = np.array(x4)
             c4 = np.array(c4)
-            u4 = np.sqrt(np.maximum(c4, 1.0))
+            u4 = np.sqrt(np.maximum(c4,1.0))
             return x4, c4, u4, info
     raise RuntimeError("No valid spectrum found.")
 
@@ -280,42 +290,41 @@ def plot_bq_fit(
 
     plt.tight_layout()
     plt.show()
+    return fig
 # ─── 5) EVERYTHING TIED TOGETHER ──────────────────────────────────────────────
 if __name__=="__main__":
-    file1 =  r"C:\Users\jrtes\OneDrive\Desktop\College Stuffs\Winter 2025\Capstone (NSE 474)\Synthetic Spectra\Synthetic Spectra\Pu_Bare_Det60cm_HPGe_outps\Pu_Bare_Det60cm_HPGe_CPS_tally18.pcf"
-    
-    # --- load full spectrum for big picture
+    file1 = r"C:\Users\jrtes\OneDrive\Desktop\College Stuffs\Winter 2025\Capstone (NSE 474)\Synthetic Spectra\Synthetic Spectra\Pu_Bare_Det60cm_HPGe_outps\Pu_Bare_Det60cm_HPGe_CPS_tally18.pcf"   # ← your path
+
+    # 1) Big picture
     specfile = load_spectra(file1)
     for i in range(specfile.numMeasurements()):
         sp   = specfile.measurement(i)
         info = parse_title(sp.title())
-        if info["PuRatio"] <= 0.07 and (1-sp.liveTime()/sp.realTime()) <= 0.10:
+        if info["PuRatio"]<=0.07 and (1-sp.liveTime()/sp.realTime())<=0.10:
             E_full = np.array(sp.channelEnergies())[1:]
             C_full = np.array(sp.gammaCounts())[1:]
             break
 
-    # choose which vertical lines you want (e.g. Pu240, Pu239)
-    x_markers = [642.23, 645.94]
+    plot_full_spectrum(E_full, C_full,
+                       troughs=(634.333, 648.245))
 
-    # big‐picture 600–700 keV
-    plot_full_spectrum(
-        E_full, C_full,
-        x_lines=x_markers,
-        troughs=(634.333, 648.245)
-    )
-
-    # now do your ROI‐fit & detailed plotting as before…
+    # 2) ROI fit & detailed plot
     x4, c4, u4, info = load_and_filter(file1)
     fit = multGaussSet(x4, c4, u4)
-    # compute peaks & FWHMs…
-    plot_bq_fit(
-        x_data = x4,
-        counts = c4,
-        unc    = u4,
-        fit    = fit,
-        peaks  = peaks,
-        fwhm   = fwhm_vals,
-        title  = f"{100-100*info['PuRatio']:.1f}% Pu239, {info['Pu_mass']}g",
-        roi    = (634.333, 648.245)
-    )
-
+    # … compute peaks, fwhm_vals …
+    plot_bq_fit( x_data=x4, counts=c4, unc=u4,
+                 fit=fit, peaks=peaks, fwhm=fwhm_vals,
+                 title=f"{100-100*info['PuRatio']:.1f}% Pu239, {info['Pu_mass']}g",
+                 roi=(634.333,648.245)
+               )
+    # Big‐picture
+    fig1 = plot_full_spectrum(E_full, C_full, troughs=(634.333, 648.245))
+    fig1.savefig("big_picture.svg")
+    
+    # Detailed
+    fig2 = plot_bq_fit( x_data=x4, counts=c4, unc=u4,
+                 fit=fit, peaks=peaks, fwhm=fwhm_vals,
+                 title=f"{100-100*info['PuRatio']:.1f}% Pu239, {info['Pu_mass']}g",
+                 roi=(634.333,648.245)
+               )
+    fig2.savefig("detailed_fit.svg")
