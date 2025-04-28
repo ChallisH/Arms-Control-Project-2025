@@ -1,0 +1,321 @@
+
+import warnings
+from collections import namedtuple
+
+import numpy as np
+import matplotlib.pyplot as plt
+import becquerel as bq
+import lmfit
+import SpecUtils
+
+# ─── 0) SIMPLE BIG‐PICTURE PLOT ────────────────────────────────────────────────
+def plot_full_spectrum(
+    E_full: np.ndarray,
+    C_full: np.ndarray,
+    x_lines: list[float],
+    troughs: tuple[float,float] = (634.333, 648.245)
+):
+    """
+    Big‐picture 600–700 keV view:
+      • GADRAS Data (step)
+      • vertical markers at energies in x_lines
+      • shaded ROI between troughs
+    """
+    # drop extra edge if present
+    if E_full.shape[0] == C_full.shape[0] + 1:
+        E_data = E_full[:-1]
+    else:
+        E_data = E_full
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+
+    ax.step(E_data, C_full, where="mid", color="black", label="GADRAS Data")
+
+    # draw reference lines
+    for x in x_lines:
+        ax.axvline(x, color="tab:blue", linestyle="--", lw=1)
+
+    # ROI shading
+    ax.axvspan(troughs[0], troughs[1],
+               color="orange", alpha=0.1, label="ROI")
+
+    ax.set_xlim(600, 700)
+    ax.set_yscale("log")
+    ax.set_xlabel("Energy (keV)")
+    ax.set_ylabel("Counts")
+    ax.legend(loc="upper right")
+    ax.grid(which="both", ls=":")
+    plt.tight_layout()
+    plt.show()
+    plt.close(fig)
+
+
+# ─── 1) DATA CONTAINERS ────────────────────────────────────────────────────────
+MultiGaussResult = namedtuple("MultiGaussResult", [
+    "x_fit", "y_total", "components", "individual",
+    "amp239", "amp240", "fwhm239", "fwhm240",
+    "result"
+])
+
+# ─── 2) CORE FITTING ROUTINE ───────────────────────────────────────────────────
+def multGaussSet(x, y, y_unc,
+                 peaks=np.array([637.75, 639.99, 642.23, 645.94]),
+                 troughs=np.array([635.1, 648.2]),
+                 loud=False):
+    idx_pk = [np.argmin(np.abs(x - p)) for p in peaks]
+    amps0  = y[idx_pk]
+    idx_tr = [np.argmin(np.abs(x - t)) for t in troughs]
+    y_tr   = y[idx_tr]
+    width  = (troughs[1] - troughs[0]) / 4
+
+    model = sum(
+        (bq.fitting.GaussModel(prefix=f"gauss{i}_") for i in range(4)),
+        lmfit.models.LinearModel(prefix="line_")
+    )
+    fitter = bq.Fitter(model, x=x, y=y, y_unc=y_unc,
+                      roi=(troughs[0], troughs[1]))
+
+    for i, p in enumerate(peaks):
+        fitter.params[f"gauss{i}_mu"].set(value=p)
+        fitter.params[f"gauss{i}_amp"].set(value=amps0[i])
+        fitter.params[f"gauss{i}_sigma"].set(value=width)
+
+    slope = (y_tr[1] - y_tr[0])/(troughs[1] - troughs[0])
+    fitter.params["line_slope"].set(value=slope)
+    fitter.params["line_intercept"].set(value=y_tr[0] - slope*troughs[0])
+
+    fitter.fit()
+    res = fitter.result
+
+    x_fit = np.linspace(troughs[0], troughs[1], 500)
+    y_tot = res.eval(x=x_fit)
+    comps = res.eval_components(x=x_fit)
+
+    indiv = {}
+    for i in range(4):
+        pref = f"gauss{i}_"
+        amp  = res.params[pref+"amp"].value
+        mu   = res.params[pref+"mu"].value
+        sig  = res.params[pref+"sigma"].value
+        yg   = amp * np.exp(-0.5*((x_fit - mu)/sig)**2)
+        ug   = np.sqrt(np.maximum(yg, 1e-6))
+        indiv[f"gauss{i}"] = {"energy": x_fit, "counts": yg, "uncertainty": ug}
+
+    amp239 = res.params["gauss3_amp"].value
+    amp240 = res.params["gauss2_amp"].value
+    fwhm239 = 2*np.sqrt(2*np.log(2))*res.params["gauss3_sigma"].value
+    fwhm240 = 2*np.sqrt(2*np.log(2))*res.params["gauss2_sigma"].value
+
+    return MultiGaussResult(
+        x_fit, y_tot, comps, indiv,
+        amp239, amp240, fwhm239, fwhm240,
+        res
+    )
+
+# ─── 3) LOADING & FILTERING ───────────────────────────────────────────────────
+def load_and_filter(pcf_file: str):
+    specfile = load_spectra(pcf_file)
+    for i in range(specfile.numMeasurements()):
+        sp   = specfile.measurement(i)
+        info = parse_title(sp.title())
+        if info["PuRatio"] <= 0.07 and (1-sp.liveTime()/sp.realTime()) <= 0.10:
+            E = np.array(sp.channelEnergies())[1:]
+            C = np.array(sp.gammaCounts())[1:]
+            x4, c4 = [], []
+            for j in range(len(E)-1):
+                if 634.333 <= E[j] < 648.245:
+                    dx = E[j+1] - E[j]
+                    for shift in (0, dx/4, dx/2, 3*dx/4):
+                        x4.append(E[j] + shift)
+                    c4.extend([
+                        C[j]/4,
+                        (C[j] + dx/4*(C[j+1]-C[j]))/4,
+                        (C[j] + dx/2*(C[j+1]-C[j]))/4,
+                        (C[j] + 3*dx/4*(C[j+1]-C[j]))/4
+                    ])
+            x4 = np.array(x4)
+            c4 = np.array(c4)
+            u4 = np.sqrt(np.maximum(c4, 1.0))
+            return x4, c4, u4, info
+    raise RuntimeError("No valid spectrum found.")
+
+# ─── 4) DETAILED FIT‐PLOT (unchanged) ──────────────────────────────────────────
+import numpy as np
+import matplotlib.pyplot as plt
+
+def plot_bq_fit(
+    x_data,
+    counts,
+    unc,
+    fit,
+    peaks,
+    fwhm,
+    title=None,
+    roi=None
+):
+    """
+    Custom two‐panel fit plot, with:
+      • GADRAS Data (points+errorbars)
+      • Interpolated Data Points
+      • Best Fit ±1σ band
+      • Background
+      • Gauss0–Gauss3 (filled to y=0)
+      • Single‐column legend in your desired order
+    """
+    res    = fit.result
+    x_fit  = fit.x_fit
+    y_fit  = fit.y_total
+    comps  = fit.components    # dict of each component ("gauss0_",…,"line_")
+    indiv  = fit.individual    # dict of each gaussian alone
+
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(10, 8),
+        gridspec_kw={"height_ratios": [3, 1]},
+        sharex=True
+    )
+
+    idx_actual = np.arange(0, len(x_data), 4)
+    idx_interp = np.setdiff1d(np.arange(len(x_data)), idx_actual)
+    
+    # now, in your plot_bq_fit(), BEFORE you plot anything else, do:
+    ax1.errorbar(
+        x_data[idx_actual],          # the real bins
+        counts[idx_actual],
+        yerr=unc[idx_actual],
+        fmt="o",
+        color="black",
+        label="GADRAS Data"
+    )
+    
+    ax1.scatter(
+        x_data[idx_interp],          # the interpolated points
+        counts[idx_interp],
+        marker="x",
+        color="gray",
+        label="Interpolated Data Points"
+    )
+
+
+    # 3) Best-fit ±1σ
+    y_unc = res.eval_uncertainty(x=x_fit)
+    ax1.fill_between(
+        x_fit,
+        y_fit - y_unc, y_fit + y_unc,
+        color="red", alpha=0.2,
+        label="Best Fit ±1σ"
+    )
+    ax1.plot(
+        x_fit, y_fit,
+        ls="--", color="red", lw=2,
+        label="Best Fit"
+    )
+
+    # 4) Background
+    bg = comps["line_"]
+    ax1.plot(
+        x_fit, bg,
+        ls="--", color="purple",
+        label="Background"
+    )
+
+    gauss_colors = ["tab:blue", "tab:orange", "tab:green", "tab:cyan"]
+    # 5) Gauss0–Gauss3 (filled down to y=0)
+    for i in range(4):
+        key = f"gauss{i}_"
+        y_comp = comps[key]
+        col    = gauss_colors[i]
+        label = f"Gauss{i}"
+        # plot the line in your chosen color
+        ax1.plot(x_fit, y_comp, lw=1.5, color=col, label=label)
+        # fill under the curve in the same color (but lighter)
+        ax1.fill_between(x_fit, 0, y_comp, color=col, alpha=0.2)
+
+
+
+    # 7) ROI shading
+    if roi is not None:
+        ax1.axvspan(roi[0], roi[1],
+                    color="orange", alpha=0.1)
+
+    ax1.set_yscale("linear")
+    ax1.set_ylabel("Counts")
+    if title:
+        ax1.set_title(title)
+    ax1.grid(which="both", ls=":")
+
+    # reorder legend to single column in desired order
+    handles, labels = ax1.get_legend_handles_labels()
+    desired = [
+        "GADRAS Data",
+        "Interpolated Data Points",
+        "Best Fit",
+        "Background",
+        "Gauss0", "Gauss1", "Gauss2", "Gauss3"
+    ]
+    ordered_h = []
+    ordered_l = []
+    for d in desired:
+        if d in labels:
+            idx = labels.index(d)
+            ordered_h.append(handles[idx])
+            ordered_l.append(labels[idx])
+    ax1.legend(
+        ordered_h, ordered_l,
+        loc="upper left",
+        ncol=1,
+        handletextpad=0.5,
+        labelspacing=0.5,
+        borderpad=0.3
+    )
+
+    # 8) Residuals panel
+    y_mod = np.interp(x_data, x_fit, y_fit)
+    resid = (counts - y_mod) / unc
+    ax2.scatter(x_data, resid, s=12, color="black")
+    ax2.axhline(0, color="red", ls="--", lw=1)
+    ax2.set_xlabel("Energy (keV)")
+    ax2.set_ylabel("Residuals")
+    ax2.set_ylim(-5, 5)
+    ax2.grid(which="both", ls=":")
+
+    plt.tight_layout()
+    plt.show()
+# ─── 5) EVERYTHING TIED TOGETHER ──────────────────────────────────────────────
+if __name__=="__main__":
+    file1 =  r"C:\Users\jrtes\OneDrive\Desktop\College Stuffs\Winter 2025\Capstone (NSE 474)\Synthetic Spectra\Synthetic Spectra\Pu_Bare_Det60cm_HPGe_outps\Pu_Bare_Det60cm_HPGe_CPS_tally18.pcf"
+    
+    # --- load full spectrum for big picture
+    specfile = load_spectra(file1)
+    for i in range(specfile.numMeasurements()):
+        sp   = specfile.measurement(i)
+        info = parse_title(sp.title())
+        if info["PuRatio"] <= 0.07 and (1-sp.liveTime()/sp.realTime()) <= 0.10:
+            E_full = np.array(sp.channelEnergies())[1:]
+            C_full = np.array(sp.gammaCounts())[1:]
+            break
+
+    # choose which vertical lines you want (e.g. Pu240, Pu239)
+    x_markers = [642.23, 645.94]
+
+    # big‐picture 600–700 keV
+    plot_full_spectrum(
+        E_full, C_full,
+        x_lines=x_markers,
+        troughs=(634.333, 648.245)
+    )
+
+    # now do your ROI‐fit & detailed plotting as before…
+    x4, c4, u4, info = load_and_filter(file1)
+    fit = multGaussSet(x4, c4, u4)
+    # compute peaks & FWHMs…
+    plot_bq_fit(
+        x_data = x4,
+        counts = c4,
+        unc    = u4,
+        fit    = fit,
+        peaks  = peaks,
+        fwhm   = fwhm_vals,
+        title  = f"{100-100*info['PuRatio']:.1f}% Pu239, {info['Pu_mass']}g",
+        roi    = (634.333, 648.245)
+    )
+
