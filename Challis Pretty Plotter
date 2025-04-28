@@ -1,0 +1,934 @@
+### Example script for reading files with SpecUtils
+### Created 02/11/2025
+import warnings
+
+import lmfit
+import becquerel as bq
+import SpecUtils
+import math
+import numpy as np
+import scipy
+import matplotlib.pyplot as plt
+from scipy.stats import norm
+from typing import Any
+
+#help(specutils.utils.wcs_utils)
+
+########## FROM Becquerels Example ###############
+
+%matplotlib inline
+plt.rcParams["figure.facecolor"] = "white"
+
+%load_ext autoreload
+%autoreload 2
+
+np.random.seed(0)
+
+warnings.filterwarnings("ignore")
+
+
+
+##############
+
+def load_spectra(path_to_spectra: str) -> SpecUtils.SpecFile():
+    """
+    Loads spectrum file automatically for a given file type.
+    SpecUtils.ParserType.Auto will try to automatically determine
+    the file extension, so verify you are loading a compatible file"""
+
+    spec_file = SpecUtils.SpecFile()
+    try:
+        spec_file.loadFile(path_to_spectra, SpecUtils.ParserType.Auto)
+        return spec_file
+
+    except RuntimeError as e:
+        raise Exception(f"Failed to decode file: {e}")
+
+    return
+
+def parse_title(spectrum_title: str) -> dict[str, Any]:
+    """
+    Parses all the information in my (Tanner's) .pcf file titles
+    and loads it into a dictionary.
+
+    A few notes:
+        1. There is a bit of information here not useful for the
+           arm control information barriers project but is here
+           because of another project. You will not need things like
+           nps, U235 content, etc.
+        2. Pu239, Pu240, and other isotopics are weight fractions
+           are represented as NEGATIVE NUMBERS and you might want to
+           switch them back to positive.
+        3. det_max_erg is in MeV, but its more common to use keV.
+        4. PuRatio is just the ratio of Pu240/Pu239 and is positive
+           already since, yknow, negative divided by a negative.
+        5. NPS is a relic. Ignore, as it makes no sense in this context.
+        6. Titles are unique to the person/software that generated the
+           spectrum. If/when you use another detector or input a spectrum
+           I did not provide, the title will be different and this function
+           will not work.
+
+    Args:
+        spectrum_title: spectrum title as string
+
+    Returns:
+        Dictionary containing what the spectrum represents
+    """
+
+    try: # This is to ensure the code still works if given a file without Tanner's naming convention
+        
+        snm, U232, U235, U238, Pu239, Pu240, Pu241, PuRatio, age, snmir, snmor, \
+        U_mass, Pu_mass, shd_mat, shdor, det_type, det_dist, det_bins, det_max_erg, \
+        nps = spectrum_title.split("_")
+
+        return {"snm":	snm, "U232": float(U232), "U235": float(U235), "U238": float(U238), "Pu239": float(Pu239),
+            "Pu240": float(Pu240), "Pu241": float(Pu241), "PuRatio": float(PuRatio), "age": int(age),
+            "snmir": float(snmir), "snmor": float(snmor), "U_mass": float(U_mass), "Pu_mass": float(Pu_mass),
+            "shd_mat": shd_mat, "shdor": float(shdor), "det_type": det_type, "det_dist": float(det_dist),
+            "det_bins": int(det_bins), "det_max_erg": float(det_max_erg), "nps": nps }
+        
+    except: # If the file title doesn't have Tanner's style, these will be the returned values, all numbers are 0's and all strings say 'N/A'
+        
+        return {"snm":	'N/A', "U232": 0, "U235": 0, "U238": 0, "Pu239": 0,
+            "Pu240": 0, "Pu241": 0, "PuRatio": 0, "age": 0,
+            "snmir": 0, "snmor": 0, "U_mass": 0, "Pu_mass": 0,
+            "shd_mat": 'N/A', "shdor": 0, "det_type": 'N/A', "det_dist": 0,
+            "det_bins": 0, "det_max_erg": 0, "nps": 'N/A' }
+
+def ratioCalc(Amp239 , Amp240):
+
+    '''
+    Inputs: Intensity of Pu239 emissions at 645 keV and of 240 at 642 keV
+    This will need an intensity from the Pu239 and 240 peaks to glean an isotopic ratio of the two
+
+    NOTE: This is calculating an atomic ratio of the two based on the intensity of the 2 isotopes.
+    The tricky bit is deconvoluting the spectrum into individual peaks for these emissions and using those peak
+    areas along with their relative efficiency differences to find these intensities.
+
+    All values pulled from Brookhaven: https://www.nndc.bnl.gov/nudat3/dec_searchi.jsp
+
+    Pu239 has emission at 639.9 keV at 8.70E-6% intensity, possibly the middle peak
+    '''
+    t239 = 24110 # Half-life of Pu239 in years
+
+    t240 = 6561 # Half-life of Pu240 in years
+    
+    lambda239 = np.log(2)/(t239 * 365 * 24 * 60 *60) #lambda from halflife of Pu239 in seconds 
+
+    lambda240 = np.log(2)/(t240 * 365 * 24 * 60 *60) #lambda from halflife of Pu234 in seconds
+
+    Bi_Pu240_642 = 1.248E-5 #Branching Intensity for Pu240 emission of 642.23 keV
+
+    Bi_Pu239_645 = 1.52E-5 #Branching Intensity for Pu239 emission of 645.94 keV 
+
+    return ((Amp239/(lambda239 * Bi_Pu239_645)) / ((Amp239/(lambda239 * Bi_Pu239_645) + (Amp240/(lambda240 * Bi_Pu240_642)))))
+
+def ratioCalcAllPeaks(Amp239 , Amp240 , AmpDouble , AmpMiddle):
+
+    '''
+    Inputs: Intensity of Pu239 emissions at 637.7 , 637.8 , 639.9, and 645 keV and of Pu240 at 642 keV
+    This will need an intensity from the Pu239 and 240 peaks to glean an isotopic ratio of the two
+
+    NOTE: This is calculating an atomic ratio of the two based on the intensity of the 2 isotopes.
+    The tricky bit is deconvoluting the spectrum into individual peaks for these emissions and using those peak
+    areas along with their relative efficiency differences to find these intensities.
+
+    All values pulled from Brookhaven: https://www.nndc.bnl.gov/nudat3/dec_searchi.jsp
+
+    This tends to overshoot the amount of Pu239, so typically just use the ratioCalc() function for calculations
+    '''
+    t239 = 24110 # Half-life of Pu239 in years
+
+    t240 = 6561 # Half-life of Pu240 in years
+    
+    lambda239 = np.log(2)/(t239 * 365 * 24 * 60 *60) #lambda from halflife of Pu239 in seconds 
+
+    lambda240 = np.log(2)/(t240 * 365 * 24 * 60 *60) #lambda from halflife of Pu234 in seconds
+
+    Bi_239_6377 = 2.56E-6 #Branching Intensity for Pu239 emission of 637.7 keV
+
+    Bi_239_6378 = 2.56E-6 #Branching Intensity for Pu239 emission of 637.8 keV
+
+    Bi_239_6399 = 8.70E-6 #Branching Intensity for Pu239 emission of 639.9 keV
+
+    Bi_Pu240_642 = 1.248E-5 #Branching Intensity for Pu240 emission of 642.23 keV
+
+    Bi_Pu239_645 = 1.52E-5 #Branching Intensity for Pu239 emission of 645.94 keV 
+
+    return ((Amp239/(lambda239 * Bi_Pu239_645) + AmpDouble/(lambda239 * (Bi_239_6377 + Bi_239_6378)) + AmpMiddle/(lambda239 * Bi_239_6399)) / 
+            ((Amp239/(lambda239 * Bi_Pu239_645) + AmpDouble/(lambda239 * (Bi_239_6377 + Bi_239_6378)) + AmpMiddle/(lambda239 * Bi_239_6399)
+              + (Amp240/(lambda240 * Bi_Pu240_642)))))
+
+def nearestPeak(targets , xEnergy , yCounts):
+
+    '''
+    value: Array of energies of peaks of interest (i.e. for Pu239 value = 645.97 keV)
+    
+    array: channels or energies of interest (filteredEnergy is my default)
+    
+    dps: CPS array without background, I linearly subtracted background from my OG CPS array
+    and created CPSNoBkrnd as my default
+        
+    spread: Number of points before and after the peak that should be used for creating the 
+            polynomial fit. My default is 2 because a lot of these peaks appear to have 2 points
+            before and after the apex that are relatively unaffected by the other emissions
+
+    Returns:
+
+        Curve - Array of CPS or Counts to be plotted with the original spectrum
+
+        Indices - The indices of the 
+                    
+    '''
+
+    xVals = []
+
+    yVals = []
+
+    index = 0
+
+    for i in targets:
+
+        index = np.argmin((np.abs(xEnergy-i)))
+
+        xVals.append(xEnergy[index])
+
+        yVals.append(yCounts[index])
+
+    return xVals , yVals
+    
+
+def peakVals(xEnergy , yCounts , focus=10):
+    
+    peakIdx = scipy.signal.find_peaks(yCounts , height = focus)[0]
+
+    allPeakE = xEnergy[peakIdx]
+
+    allPeakC = yCounts[peakIdx]
+
+    return allPeakE , allPeakC
+
+################## Bq TIME #########################
+
+            
+def multGaussSet(xEnergy , yCounts , yUnc , gaussPeakEnergy = np.array([637.75 , 639.99 , 642.23 , 645.94]) ,
+                 tXVals = np.array([635.1 , 648.2]), loud = 0):
+
+    '''
+    Inputs: xEnergy - energy bins of interest
+            yCounts - Counts for energy bins of interest
+            yUnc - sqrt of yCounts (uncertainty in counts)
+            gaussPeakEnergy - known gamma emissions of Pu239 and Pu240 in our cluster of interest
+                * Pu239 emits a gamma at 637.7 keV and 637.8 keV, but the de-convolution cannot break these into 2 similarly sized peaks
+                    therefore I am calling this one emission at 637.75
+            troughTargets - border values around the peak cluster of interest
+            
+    Returns: gaussPeakEnergy - energies of the peaks of interest
+            gaussPeakCounts - Counts for the peaks of interest
+            tXVals - energies of the border values
+            tYVals - counts of the border values
+
+    NOTE: After using this function on some well defined spectra and fitting gaussians as intended,
+            I am using the values of energy for those peaks on the other spectra to see if it will fit
+            a similar gaussian cluster
+    '''
+
+    peakIndices = [np.where(np.isclose(xEnergy, e , rtol=2e-04 , atol=1e-08))[0][0] for e in gaussPeakEnergy]
+
+    gaussPeakCounts = np.array(yCounts[peakIndices])
+
+    troughIndices = [np.where(np.isclose(xEnergy, e , rtol=2e-04 , atol=1e-08))[0][0] for e in tXVals]
+
+    tYVals = np.array(yCounts[troughIndices])
+
+    width = (tXVals[1] - tXVals[0])/4
+
+    
+
+    model = (
+        bq.fitting.GaussModel(prefix="gauss0_")
+        + bq.fitting.GaussModel(prefix="gauss1_")
+        + bq.fitting.GaussModel(prefix="gauss2_")
+        + bq.fitting.GaussModel(prefix="gauss3_")
+        + lmfit.models.LinearModel(prefix="line_")
+    )
+            
+    params = {
+        "gauss0_amp": gaussPeakCounts[0],
+        "gauss0_mu": gaussPeakEnergy[0],
+        "gauss0_sigma": width,
+        "gauss1_amp": gaussPeakCounts[1],
+        "gauss1_mu": gaussPeakEnergy[1],
+        "gauss1_sigma": width,
+        "gauss2_amp": gaussPeakCounts[2],
+        "gauss2_mu": gaussPeakEnergy[2],
+        "gauss2_sigma": width,
+        "gauss3_amp": gaussPeakCounts[3],
+        "gauss3_mu": gaussPeakEnergy[3],
+        "gauss3_sigma": width,
+        "line_slope": (tYVals[1]-tYVals[0])/(tXVals[1]-tXVals[0]),
+        "line_intercept": tYVals[0] - ((tYVals[1]-tYVals[0])/(tXVals[1]-tXVals[0])) * tXVals[0],
+    }
+            
+    fitter = bq.Fitter(
+        model,
+        x = xEnergy ,
+        y = yCounts,
+        y_unc = yUnc,
+        roi=(tXVals[0] , tXVals[1]),
+    )
+    
+    fitter.params["gauss0_mu"].set(value=gaussPeakEnergy[0])
+    fitter.params["gauss1_mu"].set(value=gaussPeakEnergy[1])
+    fitter.params["gauss2_mu"].set(value=gaussPeakEnergy[2])
+    fitter.params["gauss3_mu"].set(value=gaussPeakEnergy[3])
+    #fitter.fit(backend="lmfit") # Comment out the fitter.fit() and uncomment this to see if the residuals decrease with an exponential background fit
+    #fitter.fit(backend="minuit-pml") #Also test this to see if it reduces error, last time it broke everything and made me tweak out
+    fitter.fit() # The std's increase as counts increase, I think it is statistically a bad thing when there are obvious trends in error with data like this
+    fitter.custom_plot(residual_type="sigma")
+
+    #fitter.custom_plot() # Shows residuals as absolute difference between 
+    plt.tight_layout()
+    plt.show()
+
+    result = fitter.result
+
+    amp_double = result.params["gauss0_amp"].value
+    amp_middle = result.params["gauss1_amp"].value
+    amp_240 = result.params["gauss2_amp"].value
+    amp_239 = result.params["gauss3_amp"].value
+    
+
+    fwhm240 = 2 * np.sqrt(2 * np.log(2)) * result.params["gauss2_sigma"].value
+    fwhm239 = 2 * np.sqrt(2 * np.log(2)) * result.params["gauss3_sigma"].value
+
+    x = np.linspace(634.33325195 , 648.24462891 , 100)
+    y = result.eval(x=x)
+    components = result.eval_components(x=x)
+
+    gauss_y = []
+
+    for i in range(4):
+        prefix = f"gauss{i}_"
+        params = result.params
+        amplitude = params[prefix + "amp"].value
+        center = params[prefix + "mu"].value
+        sigma = params[prefix + "sigma"].value
+        gauss_y.append(amplitude * np.exp(-0.5 * ((xEnergy - center) / sigma) ** 2))
+
+    gauss_y = np.array(gauss_y)
+
+    return gaussPeakEnergy , gaussPeakCounts , tXVals , tYVals , amp_240 , amp_239 , amp_double , amp_middle , fwhm240 , fwhm239 , x , y , components , gauss_y
+
+
+def main(pcf_file: str , loud = 0):
+    
+    '''
+    Inputs: String directing funtion where to pull spectra from
+
+    Returns:
+    
+            filteredChannels = array of channels for energies from 600-700keV
+            filteredEnergy = array of energy bins from 600-700keV 
+            filteredCPS = array of counts per second
+            filteredCounts = array of counts
+            uncert = array of square root of counts (uncertainty in each count)
+            
+    Below is an example of opening a .PCF file which contains 350 spectra,
+    finding a single WGPu spectrum, converting the counts to CPS, and printing
+    CPS in each bin/channel
+
+    ********
+    WARNING! Because of a hiccup in my simulations on my other project, there
+    are 4097 bins in each spectrum when you should only use 4096. For context,
+    this happened because I needed to match my GADRAS-DRF and MCNP simulations.
+
+    You MUST make sure you remove the last channel whenever you grab counts
+    from this dataset!
+
+    Example:
+
+    >>> counts_per_bin = [0, 1, ..., 20, 3]
+    >>> counts_per_bin_except_last = counts_per_bin[:-1]
+    >>> counts_per bin_except_last
+    >>>
+    >>> [0, 1, ..., 20]
+    '''
+
+    ### Define a few constants (just an example, choose what you want/need)
+    isWGPu_threshold = 0.07
+    deadtime_frac_threshold = 0.10
+
+
+    spectra = load_spectra(pcf_file)
+
+    ### Find the first WGPu spectrum with acceptable dead time
+    for i in range(spectra.numMeasurements()):
+
+        spectrum = spectra.measurement(i)        # Get single measurement i.e., spectrum
+        info = parse_title(spectrum.title())     # Get info from the title
+        livetime = spectrum.liveTime()           # Get live time
+        realtime = spectrum.realTime()           # Get real time
+        deadtime_frac = (1-livetime/realtime)    # E.g., if live 10 secs but real 100 secs, deadtime frac = 90%
+
+        # WGPu found with low enough dead time
+        if info["PuRatio"] <= isWGPu_threshold and deadtime_frac <= deadtime_frac_threshold:
+
+            energy = np.array(spectrum.channelEnergies())#[:-1]
+            energy = energy[1:]
+            counts = spectrum.gammaCounts()#[:-1] # Remove last bin for reasons above!
+            counts = np.array(counts)#[:-1]       # Convert to np.array for quick array manipulation
+            cps = counts/livetime                # Convert to counts per second
+            channels = np.arange(1 , len(counts) + 1) # Number of Channels
+
+            maskedEnergy = []
+
+            maskedCounts = []
+            
+            filteredChannels = [] # Channels for 600-700 keV
+            
+            filteredEnergy = [] # Energy bins for 600-700 keV
+            
+            filteredCPS = [] # Counts per second at each bin from 600-700 keV
+
+            filteredCounts = [] # Counts at each bin from 600-700 keV
+
+            uncert = [] # Sqrt of counts (uncertainty in counts)
+            
+            for i in range(len(energy)):
+                
+                if 634.33325195 <= energy[i] < 648.24462891:
+                    
+                    filteredEnergy.append(energy[i])
+
+                    filteredEnergy.append(energy[i] + (energy[i+1]-energy[i])/4)
+
+                    filteredEnergy.append(energy[i] + (energy[i+1]-energy[i])/2)
+
+                    filteredEnergy.append(energy[i] + 3*(energy[i+1]-energy[i])/4)
+            
+                    filteredCPS.append(cps[i])
+
+                    filteredCounts.append(counts[i]/4)
+
+                    filteredCounts.append((counts[i] + (counts[i+1]-counts[i])/4)/4)
+
+                    filteredCounts.append((counts[i] + (counts[i+1]-counts[i])/2)/4)
+
+                    filteredCounts.append((counts[i] + 3*(counts[i+1]-counts[i])/4)/4)
+
+                    filteredChannels.append(channels[i])
+
+                    maskedEnergy.append(energy[i])
+
+                    maskedCounts.append(counts[i])
+
+            for i in filteredCounts:
+                if i == 0:
+                        
+                    uncert.append(1.0)
+                        
+                else:
+                        
+                    uncert.append(np.sqrt(i))
+
+                    
+            filteredEnergy = np.array(filteredEnergy)
+            
+            filteredCPS = np.array(filteredCPS)
+
+            filteredCounts=np.array(filteredCounts)
+
+            filteredChannels = np.array(filteredChannels)
+
+            uncert = np.array(uncert)
+
+            ratio, mass, shield, distance, age , shThic = (
+                info['PuRatio'], 
+                info['Pu_mass'], 
+                info['shd_mat'], 
+                info['det_dist'],
+                info['age'],
+                info['shdor']
+                ) #This is turning information from parse_title into useful variables
+
+            EPu240 = 642.23 #keV
+            
+            EPu239 = 645.94 #keV
+
+            cluster1 = 637.7 #keV
+
+            cluster2 = 637.8 #keV
+
+            cluster3 = 639.99 #keV
+            
+            EPu239LB = 658.86 #keV
+            
+                
+            '''    ^^^
+            According to Brookhaven nuclear data library: https://www.nndc.bnl.gov/nudat3/indx_dec.jsp
+            '''
+            
+            graphVars = multGaussSet(filteredEnergy , filteredCounts , uncert)
+
+            amp240 , amp239 , ampDouble , ampMiddle , fwhm240 , fwhm239 , gaussX , gaussY , gaussModel , individualGauss = (graphVars[4] , graphVars[5] , graphVars[6] ,
+                                                            graphVars[7] , graphVars[8] , graphVars[9] , graphVars[10] , graphVars[11] , graphVars[12] , graphVars[13])
+                                                                          
+            
+            break                                # End loop
+            
+    if loud:
+
+        num_ticks = 10 # Increase for more tick marks
+
+        x_min , x_max = min(filteredEnergy) , max(filteredEnergy)
+            
+        xticks = np.linspace(x_min, x_max, num_ticks)  # Generate evenly spaced x-ticks
+        
+        plt.figure(figsize=(10, 5))
+        plt.xticks(xticks)  # Apply custom x-ticks
+        plt.grid(True)
+        plt.yscale('log')
+        plt.title(f'{age} Year Aged, {mass}g Sample of {100 - 100 * ratio:.2f}% (atomic) Pu239 with {shThic}cm of {shield} Shielding Taken {distance}cm From Source')
+        plt.xlabel('Energy (keV)')
+        plt.ylabel('Counts/Second')
+        #plt.ylim(0, 10000) # Only needed when plotting the individual Gaussian's becuase they go super negative
+        plt.step(maskedEnergy , maskedCounts , color = 'grey' , label = 'Original Data')
+        plt.step(filteredEnergy , filteredCounts , color = 'black' , label = 'Interpolated Data')
+
+        '''
+        # This should be plotting the 4 individually fitted gaussians, it looks bad though
+        for i in range(4):  # assuming 4 components: g0_, g1_, g2_, g3_ 
+            y_i = gaussModel[f"gauss{i}_"]  # note the trailing underscore!
+            plt.plot(gaussX, y_i, label=f'Gaussian {i}')
+        '''
+        
+        #plt.plot(gaussX , gaussY , color = 'red' , label = 'Overall Gaussian Fit') # Overall Gaussian fit
+        '''
+        plt.plot(filteredEnergy , individualGauss[0] , label = 'Gauss Fit 1')
+        plt.plot(filteredEnergy , individualGauss[1] , label = 'Gauss Fit 2')
+        plt.plot(filteredEnergy , individualGauss[2] , label = 'Gauss Fit 3')
+        plt.plot(filteredEnergy , individualGauss[3] , label = 'Gauss Fit 4')
+        '''
+        plt.axvline(x=EPu240, ymin=0, ymax=1 , color = 'orange' , label = 'Peaks of Interest')
+        plt.axvline(x=EPu239, ymin=0, ymax=1 , color = 'orange')
+        plt.axvline(x=cluster1, ymin=0, ymax=1, color = 'orange')
+        plt.axvline(x=cluster2, ymin=0, ymax=1, color = 'orange')
+        plt.axvline(x=cluster3, ymin=0, ymax=1, color = 'orange')
+        #plt.plot(graphVars[0] , graphVars[1] , marker='x', linestyle='none' , color = 'tab:blue')
+        #plt.plot(graphVars[2] , graphVars[3] , marker = 'o' , linestyle = 'none' , color = 'tab:blue' ,
+        #         label = 'Range of Interest for De-Convolution') #O markers on troughs around the triple gaussians
+
+        plt.show()
+
+       # === 3rd plot: individual gaussian components, truncated at y >= 1e-6 ===
+        # graphVars returns at indices:
+        # 10 → x_fit (fine grid), 12 → components dict (keys "gauss0_", "gauss1_", …)
+        x_fit, components = graphVars[10], graphVars[12]
+        
+        plt.figure(figsize=(10, 5))
+        for prefix, y_comp in components.items():
+            # clip everything below 1e-6 up to 1e-6
+            y_clipped = np.clip(y_comp, 1e-6, None)
+            plt.plot(x_fit, y_clipped, label=prefix.rstrip('_'))
+        
+        plt.legend(loc="upper left")
+        plt.yscale("log")
+        plt.ylim(bottom=1e-6)    # ensure log‐axis floor
+        plt.xlabel("Energy (keV)")
+        plt.ylabel("Counts")
+        plt.title("Individual Gaussian Components (y ≥ 1e-6)")
+        plt.grid(which="both", ls=":")
+        plt.tight_layout()
+        plt.show()
+
+        calcRatio = ratioCalc(amp239 , amp240)
+
+        calcRatioAllPeaks = ratioCalcAllPeaks(amp239 , amp240 , ampDouble , ampMiddle)
+
+        error = np.abs((1-ratio)-calcRatio)/(1-ratio) * 100
+
+        print('Sum of original counts:' , sum(maskedCounts))
+
+        print('Sum of interpolated counts:' , sum(filteredCounts))
+
+        print('Pu239 Atomic Percent from Calculation:' , calcRatio*100)
+        print('Actual Pu239 Atomic Percent:' , (1-ratio)*100)
+        print('Error:' , error , '%')
+        
+        
+        if calcRatio >= 0.93:
+            print('Algorithm Produces Green Light')
+        else:
+            print('Algorithm Produces Red Light')
+        
+    return filteredChannels , filteredEnergy , filteredCPS , filteredCounts , uncert , ratio , mass , shield , distance , age , shThic
+
+
+    
+
+
+
+
+    
+
+
+import warnings
+from collections import namedtuple
+
+import numpy as np
+import matplotlib.pyplot as plt
+import becquerel as bq
+import lmfit
+import SpecUtils
+from scipy import stats
+
+def plot_full_spectrum(
+    E_full: np.ndarray,
+    C_full: np.ndarray,
+    troughs: tuple[float,float] = (634.333, 648.245)
+):
+    """
+    Big-picture 600–700 keV view:
+      • GADRAS data as a step plot
+      • specified vertical lines
+      • shaded ROI
+      • linear y-scale
+    """
+    # align energies/counts
+    if E_full.shape[0] == C_full.shape[0] + 1:
+        E_data = E_full[:-1]
+    else:
+        E_data = E_full
+
+    # restrict to 600–700 keV
+    mask = (E_data >= 600) & (E_data <= 700)
+    x = E_data[mask]
+    y = C_full[mask]
+
+    fig, ax = plt.subplots(figsize=(10,4))
+
+    # step plot of the raw spectrum
+    ax.step(x, y, where="mid", color="black", label="GADRAS Data")
+
+    # vertical lines
+    ax.axvline(642.48, color="orange", linewidth=2, linestyle=":", label="Pu-240 (642.23)")
+    ax.axvline(645.97, color="cyan",   linewidth=2, linestyle=":", label="Pu-239 ( 645.)")  
+    #ax.axvline(639.9, color="blue",   linewidth=2, linestyle=":", label="Pu-239 (639.9)")
+
+
+    # ROI shading
+    ax.axvspan(troughs[0], troughs[1], color="orange", alpha=0.1, label="ROI")
+
+    ax.set_xlim(600, 700)
+    ax.set_yscale("linear")
+    ax.set_xlabel("Energy (keV)")
+    ax.set_ylabel("Counts")
+    ax.legend(loc="upper right", frameon=False)
+    ax.grid(which="both", ls=":")
+
+    plt.tight_layout()
+    plt.show()
+    plt.close(fig)
+    return fig
+
+
+# ─── 1) DATA CONTAINERS ────────────────────────────────────────────────────────
+MultiGaussResult = namedtuple("MultiGaussResult", [
+    "x_fit", "y_total", "components", "individual",
+    "amp239", "amp240", "fwhm239", "fwhm240",
+    "result"
+])
+
+# ─── 2) CORE FITTING ROUTINE ───────────────────────────────────────────────────
+def multGaussSet(x, y, y_unc,
+                 peaks=np.array([637.75, 639.99, 642.23, 645.94]),
+                 troughs=np.array([635.1, 648.2]),
+                 loud=False):
+    """Fit 4 Gaussians + linear BG, return everything for plotting/customization."""
+    idx_pk = [np.argmin(np.abs(x - p)) for p in peaks]
+    amps0  = y[idx_pk]
+    idx_tr = [np.argmin(np.abs(x - t)) for t in troughs]
+    y_tr   = y[idx_tr]
+    width  = (troughs[1] - troughs[0]) / 4
+
+    model = sum(
+        (bq.fitting.GaussModel(prefix=f"gauss{i}_") for i in range(4)),
+        lmfit.models.LinearModel(prefix="line_")
+    )
+    fitter = bq.Fitter(model, x=x, y=y, y_unc=y_unc,
+                      roi=(troughs[0], troughs[1]))
+
+    for i, p in enumerate(peaks):
+        fitter.params[f"gauss{i}_mu"].set  (value=p)
+        fitter.params[f"gauss{i}_amp"].set (value=amps0[i])
+        fitter.params[f"gauss{i}_sigma"].set(value=width)
+
+    slope = (y_tr[1] - y_tr[0])/(troughs[1] - troughs[0])
+    fitter.params["line_slope"].set    (value=slope)
+    fitter.params["line_intercept"].set(value=y_tr[0] - slope*troughs[0])
+
+    fitter.fit()
+    res = fitter.result
+
+    x_fit = np.linspace(troughs[0], troughs[1], 500)
+    y_tot = res.eval(x=x_fit)
+    comps = res.eval_components(x=x_fit)
+
+    indiv = {}
+    for i in range(4):
+        pref = f"gauss{i}_"
+        amp  = res.params[pref+"amp"].value
+        mu   = res.params[pref+"mu"].value
+        sig  = res.params[pref+"sigma"].value
+        yg   = amp * np.exp(-0.5*((x_fit-mu)/sig)**2)
+        ug   = np.sqrt(np.maximum(yg,1e-6))
+        indiv[f"gauss{i}"] = {"energy": x_fit, "counts": yg, "uncertainty": ug}
+
+    amp239 = res.params["gauss3_amp"].value
+    amp240 = res.params["gauss2_amp"].value
+    fwhm239 = 2*np.sqrt(2*np.log(2))*res.params["gauss3_sigma"].value
+    fwhm240 = 2*np.sqrt(2*np.log(2))*res.params["gauss2_sigma"].value
+
+    return MultiGaussResult(
+        x_fit, y_tot, comps, indiv,
+        amp239, amp240, fwhm239, fwhm240,
+        res
+    )
+
+# ─── 3) LOADING & FILTERING ───────────────────────────────────────────────────
+def load_and_filter(pcf_file: str):
+    specfile = load_spectra(pcf_file)
+    for i in range(specfile.numMeasurements()):
+        sp   = specfile.measurement(i)
+        info = parse_title(sp.title())
+        if info["PuRatio"] <= 0.07 and (1-sp.liveTime()/sp.realTime()) <= 0.10:
+            E = np.array(sp.channelEnergies())[1:]
+            C = np.array(sp.gammaCounts())[1:]
+            x4, c4 = [], []
+            for j in range(len(E)-1):
+                if 634.333 <= E[j] < 648.245:
+                    dx = E[j+1] - E[j]
+                    for shift in (0, dx/4, dx/2, 3*dx/4):
+                        x4.append(E[j] + shift)
+                    c4.extend([
+                        C[j]/4,
+                        (C[j] + dx/4*(C[j+1]-C[j]))/4,
+                        (C[j] + dx/2*(C[j+1]-C[j]))/4,
+                        (C[j] + 3*dx/4*(C[j+1]-C[j]))/4
+                    ])
+            x4 = np.array(x4)
+            c4 = np.array(c4)
+            u4 = np.sqrt(np.maximum(c4,1.0))
+            return x4, c4, u4, info
+    raise RuntimeError("No valid spectrum found.")
+
+# ─── 4) DETAILED FIT‐PLOT (unchanged) ──────────────────────────────────────────
+import numpy as np
+import matplotlib.pyplot as plt
+
+def plot_bq_fit(
+    xEnergy,
+    yCounts,
+    x_data,
+    counts,
+    unc,
+    fit,
+    peaks,
+    fwhm,
+    title=None,
+    roi=None
+):
+    """
+    Custom two‐panel fit plot, with:
+      • GADRAS Data (points+errorbars)
+      • Interpolated Data Points
+      • Best Fit ±1σ band
+      • Background
+      • Gauss0–Gauss3 (filled to y=0)
+      • Single‐column legend in your desired order
+    """
+
+    plotX = []
+    
+    plotY = []
+
+    for i in range(len(xEnergy)):
+        
+        if 634.333 <= xEnergy[i] <= 648.245:
+
+            plotX.append(xEnergy[i])
+
+            plotY.append(yCounts[i])
+            
+    
+    res    = fit.result
+    x_fit  = fit.x_fit
+    y_fit  = fit.y_total
+    comps  = fit.components    # dict of each component ("gauss0_",…,"line_")
+    indiv  = fit.individual    # dict of each gaussian alone
+
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(10, 8),
+        gridspec_kw={"height_ratios": [3, 1]},
+        sharex=True
+    )
+
+    idx_actual = np.arange(0, len(x_data), 4)
+    idx_interp = np.setdiff1d(np.arange(len(x_data)), idx_actual)
+    
+    # now, in your plot_bq_fit(), BEFORE you plot anything else, do:
+    ax1.errorbar(
+        plotX,          # the real bins
+        plotY,
+        yerr=unc[idx_actual],
+        fmt="o",
+        color="black",
+        label="GADRAS-DRF Data"
+    )
+    
+    ax1.scatter(
+        x_data,          # the interpolated points
+        counts,
+        marker="x",
+        color="gray",
+        label="Interpolated Data Points"
+    )
+
+
+    # 3) Best-fit ±1σ
+    y_unc = res.eval_uncertainty(x=x_fit)
+    ax1.fill_between(
+        x_fit,
+        y_fit - y_unc, y_fit + y_unc,
+        color="red", alpha=0.2,
+        label="Best Fit ±1σ"
+    )
+    ax1.plot(
+        x_fit, y_fit,
+        ls="--", color="red", lw=2,
+        label="Best Fit"
+    )
+
+    # 4) Background
+    bg = comps["line_"]
+    ax1.plot(
+        x_fit, bg,
+        ls="--", color="purple",
+        label="Background"
+    )
+
+    gauss_colors = ["tab:blue", "tab:orange", "tab:green", "tab:cyan"]
+    # 5) Gauss0–Gauss3 (filled down to y=0)
+    for i in range(4):
+        key = f"gauss{i}_"
+        y_comp = comps[key]
+        col    = gauss_colors[i]
+        label = f"Gauss{i}"
+        # plot the line in your chosen color
+        ax1.plot(x_fit, y_comp, lw=1.5, color=col, label=label)
+        # fill under the curve in the same color (but lighter)
+        ax1.fill_between(x_fit, 0, y_comp, color=col, alpha=0.2)
+
+
+
+    # 7) ROI shading
+    if roi is not None:
+        ax1.axvspan(roi[0], roi[1],
+                    color="orange", alpha=0.1)
+
+    ax1.set_yscale("linear")
+    ax1.set_ylabel("Counts")
+    if title:
+        ax1.set_title(title)
+    ax1.grid(which="both", ls=":")
+
+    # reorder legend to single column in desired order
+    handles, labels = ax1.get_legend_handles_labels()
+    desired = [
+        "GADRAS-DRF Data",
+        "Interpolated Data Points",
+        "Best Fit",
+        "Background",
+        "Gauss0", "Gauss1", "Gauss2", "Gauss3"
+    ]
+    ordered_h = []
+    ordered_l = []
+    for d in desired:
+        if d in labels:
+            idx = labels.index(d)
+            ordered_h.append(handles[idx])
+            ordered_l.append(labels[idx])
+    ax1.legend(
+        ordered_h, ordered_l,
+        loc="upper left",
+        ncol=1,
+        handletextpad=0.5,
+        labelspacing=0.5,
+        borderpad=0.3
+    )
+
+    # 8) Residuals panel
+    y_mod = np.interp(x_data, x_fit, y_fit)
+    resid = (counts - y_mod) / unc
+    ax2.scatter(x_data, resid, s=12, color="black")
+    ax2.axhline(0, color="red", ls="--", lw=1)
+    ax2.set_xlabel("Energy (keV)")
+    ax2.set_ylabel("Residuals")
+    ax2.set_ylim(-5, 5)
+    ax2.grid(which="both", ls=":")
+
+    plt.tight_layout()
+    plt.show()
+    return fig
+# ─── 5) EVERYTHING TIED TOGETHER ──────────────────────────────────────────────
+if __name__ == "__main__":
+    warnings.filterwarnings("ignore")
+
+    # ← change this to your actual .pcf path, or grab it from sys.argv
+    file1 = r"Box/2025 Sr Design - Info Barriers/Synthetic Spectra/Pu_Bare_Det60cm_HPGe_outps/Pu_Bare_Det60cm_HPGe_CPS_tally18.pcf"   # ← your path
+
+
+    # 1) Big‐picture
+    specfile = load_spectra(file1)
+    for i in range(specfile.numMeasurements()):
+        sp   = specfile.measurement(i)
+        info = parse_title(sp.title())
+        if info["PuRatio"] <= 0.07 and (1 - sp.liveTime() / sp.realTime()) <= 0.10:
+            E_full = np.array(sp.channelEnergies())[1:]
+            C_full = np.array(sp.gammaCounts())[1:]
+            break
+    else:
+        raise RuntimeError("No valid measurement found.")
+
+    plot_full_spectrum(E_full, C_full, troughs=(634.333, 648.245))
+
+
+    # 2) ROI fit & detailed plot
+    x4, c4, u4, info = load_and_filter(file1)
+    fit = multGaussSet(x4, c4, u4)
+
+    # — here we extract the fitted peak centers and compute FWHMs —
+    peaks = [
+        fit.result.params[f"gauss{i}_mu"].value
+        for i in range(4)
+    ]
+    fwhm_vals = [
+        2 * np.sqrt(2 * np.log(2)) * fit.result.params[f"gauss{i}_sigma"].value
+        for i in range(4)
+    ]
+
+    title = f"{100 - 100 * info['PuRatio']:.1f}% Pu-239, {info['Pu_mass']} g"
+
+    plot_bq_fit(
+        xEnergy = E_full,
+        yCounts = C_full,
+        x_data=x4,
+        counts=c4,
+        unc=u4,
+        fit=fit,
+        peaks=peaks,
+        fwhm=fwhm_vals,
+        title=title,
+        roi=(634.333, 648.245)
+    )
