@@ -105,7 +105,7 @@ def ratioCalc(Amp239 , Amp240):
     The tricky bit is deconvoluting the spectrum into individual peaks for these emissions and using those peak
     areas along with their relative efficiency differences to find these intensities.
 
-    All values pulled from Brookhaven: https://www.nndc.bnl.gov/nudat3/dec_searchi.jsp
+    All values pulled from Brookhaven: https://www.nndc.bnl.gov/nudat3/indx_dec.jsp
 
     Pu239 has emission at 639.9 keV at 8.70E-6% intensity, possibly the middle peak
     '''
@@ -121,7 +121,9 @@ def ratioCalc(Amp239 , Amp240):
 
     Bi_Pu239_645 = 1.52E-5 #Branching Intensity for Pu239 emission of 645.94 keV 
 
-    return ((Amp239/(lambda239 * Bi_Pu239_645)) / ((Amp239/(lambda239 * Bi_Pu239_645) + (Amp240/(lambda240 * Bi_Pu240_642)))))
+    #return ((Amp239/(lambda239 * Bi_Pu239_645)) / ((Amp239/(lambda239 * Bi_Pu239_645) + (Amp240/(lambda240 * Bi_Pu240_642)))))
+
+    return ((Amp240/(lambda240 * Bi_Pu240_642) / ((Amp239/(lambda239 * Bi_Pu239_645) ))))
 
 def ratioCalcAllPeaks(Amp239 , Amp240 , AmpDouble , AmpMiddle):
 
@@ -442,13 +444,15 @@ def main(pcf_file: str , loud = 0):
 
             uncert = np.array(uncert)
 
-            ratio, mass, shield, distance, age , shThic = (
+            ratio, mass, shield, distance, age , shThic , pu240 , pu239 = (
                 info['PuRatio'], 
                 info['Pu_mass'], 
                 info['shd_mat'], 
                 info['det_dist'],
                 info['age'],
-                info['shdor']
+                info['shdor'],
+                info['Pu240'],
+                info['Pu239']
                 ) #This is turning information from parse_title into useful variables
 
             EPu240 = 642.23 #keV
@@ -470,8 +474,9 @@ def main(pcf_file: str , loud = 0):
             
             graphVars = multGaussSet(filteredEnergy , filteredCounts , uncert)
 
-            amp240 , amp239 , ampDouble , ampMiddle , fwhm240 , fwhm239 , gaussX , gaussY , gaussModel , individualGauss = (graphVars[4] , graphVars[5] , graphVars[6] ,
-                                                            graphVars[7] , graphVars[8] , graphVars[9] , graphVars[10] , graphVars[11] , graphVars[12] , graphVars[13])
+            amp240 , amp239 , ampDouble , ampMiddle , fwhm240 , fwhm239 , gaussX , gaussY , gaussModel , individualGauss , peaks = (graphVars[4] ,
+                                                            graphVars[5] , graphVars[6] , graphVars[7] , graphVars[8] , graphVars[9] , graphVars[10] ,
+                                                            graphVars[11] , graphVars[12] , graphVars[13] , graphVars[1])
                                                                           
             
             break                                # End loop
@@ -487,13 +492,15 @@ def main(pcf_file: str , loud = 0):
         plt.figure(figsize=(10, 5))
         plt.xticks(xticks)  # Apply custom x-ticks
         plt.grid(True)
-        plt.yscale('log')
+        #plt.yscale('log')
+        plt.yscale('linear')
         plt.title(f'{age} Year Aged, {mass}g Sample of {100 - 100 * ratio:.2f}% (atomic) Pu239 with {shThic}cm of {shield} Shielding Taken {distance}cm From Source')
         plt.xlabel('Energy (keV)')
         plt.ylabel('Counts/Second')
         #plt.ylim(0, 10000) # Only needed when plotting the individual Gaussian's becuase they go super negative
-        plt.step(maskedEnergy , maskedCounts , color = 'grey' , label = 'Original Data')
-        plt.step(filteredEnergy , filteredCounts , color = 'black' , label = 'Interpolated Data')
+        #plt.step(maskedEnergy , maskedCounts , color = 'grey' , label = 'Original Data')
+        #plt.step(filteredEnergy , filteredCounts , color = 'black' , label = 'Interpolated Data')
+        plt.plot(filteredEnergy , filteredCounts , color = 'black' , label = 'Interpolated Data' , linestyle = 'None' , marker = 'x')
 
         '''
         # This should be plotting the 4 individually fitted gaussians, it looks bad though
@@ -522,17 +529,24 @@ def main(pcf_file: str , loud = 0):
 
         calcRatio = ratioCalc(amp239 , amp240)
 
-        calcRatioAllPeaks = ratioCalcAllPeaks(amp239 , amp240 , ampDouble , ampMiddle)
+        roughCalc = ratioCalc(peaks[3] , peaks[2])
 
-        error = np.abs((1-ratio)-calcRatio)/(1-ratio) * 100
+        #calcRatioAllPeaks = ratioCalcAllPeaks(amp239 , amp240 , ampDouble , ampMiddle)
+
+        error = np.abs((ratio-calcRatio)/(ratio)) * 100
+
+        roughError = np.abs((ratio-roughCalc)/ratio) * 100
 
         print('Sum of original counts:' , sum(maskedCounts))
 
         print('Sum of interpolated counts:' , sum(filteredCounts))
 
-        print('Pu239 Atomic Percent from Calculation:' , calcRatio*100)
-        print('Actual Pu239 Atomic Percent:' , (1-ratio)*100)
+        print('Pu240/Pu239 Atomic Percent from Calculation:' , calcRatio*100)
+        print('Pu240/Pu239 Atomic Percent from Rough Calculation:' , roughCalc*100)
+        print('Actual Pu240/Pu239 Percent:' , ratio*100)
         print('Error:' , error , '%')
+        print('No Gaussian Error:' , roughError , '%')
+        
         
         
         if calcRatio >= 0.93:
