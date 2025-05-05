@@ -1,0 +1,97 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
+
+def plot_confusion_matrix(
+    tp, tn, fp, fn,
+    colors=None,
+    cmap_name='Oranges',
+    figsize=(6, 6),
+    annot_fontsize=20,
+    title="Confusion Matrix"
+):
+    """
+    Plots a 2×2 confusion matrix with customizable colors, white title/axis text,
+    and white colorbar labels. Cell counts remain black.
+    """
+    # Build the matrix
+    cm = np.array([[tn, fp],
+                   [fn, tp]])
+
+    # Create figure and axis
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Display matrix with chosen colormap or explicit colors
+    if colors:
+        if isinstance(colors, (list, tuple)) and len(colors) == 4:
+            cmap = ListedColormap(colors)
+            im = ax.imshow(cm, cmap=cmap, interpolation='nearest')
+        else:
+            raise ValueError("`colors` must be a list of 4 hex codes: [TN, FP, FN, TP].")
+    else:
+        im = ax.imshow(cm, cmap=cmap_name, interpolation='nearest')
+    
+    # Add colorbar and set its text to white
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.ax.yaxis.set_tick_params(color='white')
+    plt.setp(cbar.ax.get_yticklabels(), color='white')
+    if cbar.ax.yaxis.label:
+        cbar.ax.yaxis.label.set_color('white')
+
+    # Set tick labels and axis labels to white
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(['Pred WGPu', 'Pred WGPu'], fontsize=annot_fontsize, color='white')
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(['True WGPu', 'True WGPU'], fontsize=annot_fontsize, color='white')
+    ax.set_xlabel('Predicted Label', fontsize=annot_fontsize, color='white')
+    ax.set_ylabel('True Label', fontsize=annot_fontsize, color='white')
+
+    # Annotate each cell with its count (black text for contrast)
+    thresh = cm.max() / 2.0
+    for i in range(2):
+        for j in range(2):
+            ax.text(
+                j, i, int(cm[i, j]),
+                ha='center', va='center',
+                color='black',
+                fontsize=annot_fontsize
+            )
+
+    # Set the multi-line title in white
+    ax.set_title(
+        title, 
+        fontsize=annot_fontsize + 4, 
+        pad=20, 
+        color='white'
+    )
+
+    # Adjust layout to prevent clipping
+    fig.tight_layout()
+    return fig
+
+if __name__ == "__main__":
+    # Known confusion counts
+    TP, TN, FP, FN = 7143, 6070, 1790, 1797
+
+    # Multi-line title
+    multiline_title = (
+        "Confusion Matrix for PRISM's\n"
+        "Weapons Grade Plutonium Detection Algorithm"
+    )
+
+    # Plot
+    confusion_fig = plot_confusion_matrix(
+        tp=TP, tn=TN, fp=FP, fn=FN,
+        colors=None,               # use built-in 'Oranges' colormap
+        cmap_name='Oranges',
+        annot_fontsize=18,
+        title=multiline_title
+    )
+
+    # Save with tight bounding box so text isn't cut off
+    confusion_fig.savefig(
+        "confusion_transparent.svg",
+        transparent=True,
+        bbox_inches="tight",
+        pad_inches=0.1
+    )
